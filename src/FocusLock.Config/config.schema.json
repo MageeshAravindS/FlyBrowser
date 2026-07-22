@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FocusLockConfig",
+  "type": "object",
+  "required": ["examUrl", "focusMonitoring"],
+  "properties": {
+    "examUrl": {
+      "type": "string",
+      "format": "uri",
+      "description": "The single exam URL to load."
+    },
+    "allowedDomains": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Optional allow-list of origins the browser may navigate to."
+    },
+    "focusMonitoring": {
+      "type": "object",
+      "required": ["terminationThreshold"],
+      "properties": {
+        "warningThreshold": { "type": "integer", "minimum": 1, "default": 2 },
+        "terminationThreshold": { "type": "integer", "minimum": 1, "default": 3 },
+        "focusLossDebounceMs": { "type": "integer", "minimum": 0, "default": 250 }
+      }
+    },
+    "ui": {
+      "type": "object",
+      "properties": {
+        "branding": {
+          "type": "object",
+          "properties": {
+            "appName": { "type": "string", "default": "FlyLock Browser" },
+            "logoPath": { "type": "string" },
+            "accentColor": { "type": "string", "default": "#2D6CDF" }
+          }
+        },
+        "topmost": { "type": "boolean", "default": true }
+      }
+    },
+    "logging": {
+      "type": "object",
+      "properties": {
+        "logDirectory": { "type": "string" },
+        "hashChain": { "type": "boolean", "default": true }
+      }
+    },
+    "exitAuthorization": {
+      "type": "object",
+      "properties": {
+        "passwordHash": { "type": "string" },
+        "keySequence": { "type": "string", "default": "Ctrl+Alt+Shift+Q" }
+      }
+    },
+    "network": {
+      "type": "object",
+      "properties": {
+        "connectTimeoutMs": { "type": "integer", "default": 10000 },
+        "retryAttempts": { "type": "integer", "default": 3 }
+      }
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "../src/FocusLock.Config/config.schema.json",
+  "examUrl": "https://google.com",
+  "allowedDomains": [
+    "example.com",
+    "cdn.jsdelivr.net"
+  ],
+  "focusMonitoring": {
+    "warningThreshold": 1,
+    "terminationThreshold": 3,
+    "focusLossDebounceMs": 250
+  },
+  "ui": {
+    "branding": {
+      "appName": "FlyLock Browser",
+      "accentColor": "#2D6CDF"
+    },
+    "topmost": true
+  },
+  "logging": {
+    "logDirectory": null,
+    "hashChain": true
+  },
+  "exitAuthorization": {
+    "passwordHash": "576135ab2ea83fb69b763ec94ef556a310c1f54cfc073a5a5c689945037d0c9c",
+    "keySequence": "Ctrl+Alt+Shift+Q"
+  },
+  "network": {
+    "connectTimeoutMs": 10000,
+    "retryAttempts": 3
+  }
+}

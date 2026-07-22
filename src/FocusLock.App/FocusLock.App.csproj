@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\**" />
+    <Content Include="Assets\**">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CefSharp.Wpf.NETCore" Version="126.2.70" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FocusLock.Core\FocusLock.Core.csproj" />
+    <ProjectReference Include="..\FocusLock.Config\FocusLock.Config.csproj" />
+    <ProjectReference Include="..\FocusLock.Logging\FocusLock.Logging.csproj" />
+    <ProjectReference Include="..\FocusLock.Focus\FocusLock.Focus.csproj" />
+    <ProjectReference Include="..\FocusLock.Security\FocusLock.Security.csproj" />
+    <ProjectReference Include="..\FocusLock.Browser\FocusLock.Browser.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,10 @@
+# Visual Studio / .NET build outputs
+[Bb]in/
+[Oo]bj/
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.idea/
+.vscode/

@@ -1,0 +1,21 @@
+<Window x:Class="FocusLock.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:views="clr-namespace:FocusLock.App.Views"
+        mc:Ignorable="d"
+        Title="FlyLock Browser" Height="768" Width="1024"
+        WindowStyle="None" WindowState="Maximized" Topmost="True"
+        Background="#FFFFFF" KeyDown="Window_KeyDown">
+    <Grid x:Name="MainContainer">
+        <!-- Layer 0: Chromium Browser Container -->
+        <ContentControl x:Name="BrowserContainer"/>
+
+        <!-- Layer 1: Fullscreen Overlay Container (Loading, Home, Terminated, Completion, Error) -->
+        <ContentControl x:Name="OverlayContainer" Visibility="Visible"/>
+
+        <!-- Layer 2: Focus Warning Overlay Banner (Topmost) -->
+        <views:WarningOverlay x:Name="OverlayWarning" Visibility="Collapsed"/>
+    </Grid>
+</Window>

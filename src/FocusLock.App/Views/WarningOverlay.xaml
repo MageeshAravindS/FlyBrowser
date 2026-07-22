@@ -1,0 +1,61 @@
+<UserControl x:Class="FocusLock.App.Views.WarningOverlay"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008" 
+             mc:Ignorable="d" 
+             d:DesignHeight="120" d:DesignWidth="1280">
+    <Grid Background="#E0262626">
+        <Border Margin="24,16" Padding="20,16" CornerRadius="0"
+                Background="#FEF2F2" BorderBrush="#DC2626" BorderThickness="2">
+            <Border.Effect>
+                <DropShadowEffect BlurRadius="20" ShadowDepth="4" Opacity="0.2" Color="#DC2626"/>
+            </Border.Effect>
+
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <Border Grid.Column="0" Width="44" Height="44" CornerRadius="0" Background="#DC2626" Margin="0,0,16,0">
+                    <TextBlock Text="⚠️" FontSize="22" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Border>
+
+                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                    <TextBlock Text="FOCUS VIOLATION DETECTED" FontSize="15" FontWeight="Bold" Foreground="#991B1B" Margin="0,0,0,4"/>
+                    <TextBlock FontSize="13" Foreground="#7F1D1D" TextWrapping="Wrap">
+                        Focus loss recorded (<Run x:Name="RunCount" Text="1"/> of <Run x:Name="RunMax" Text="3"/>). Repeated violations will result in automatic exam session termination.
+                    </TextBlock>
+                </StackPanel>
+
+                <Button Grid.Column="2" x:Name="BtnDismiss" Click="BtnDismiss_Click" 
+                        Content="RETURN TO EXAM" Height="40" Padding="20,0" Margin="16,0,0,0" Cursor="Hand">
+                    <Button.Style>
+                        <Style TargetType="Button">
+                            <Setter Property="Background" Value="#DC2626"/>
+                            <Setter Property="Foreground" Value="#FFFFFF"/>
+                            <Setter Property="FontWeight" Value="Bold"/>
+                            <Setter Property="FontSize" Value="13"/>
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border Background="{TemplateBinding Background}" CornerRadius="0" Padding="{TemplateBinding Padding}" BorderBrush="#991B1B" BorderThickness="1">
+                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                        </Border>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                            <Style.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter Property="Background" Value="#B91C1C"/>
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Button.Style>
+                </Button>
+            </Grid>
+        </Border>
+    </Grid>
+</UserControl>
