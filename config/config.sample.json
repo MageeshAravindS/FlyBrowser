@@ -1,7 +1,9 @@
 {
   "$schema": "../src/FocusLock.Config/config.schema.json",
-  "examUrl": "https://google.com",
+  "examUrl": "http://localhost:8080/login",
   "allowedDomains": [
+    "localhost",
+    "http://localhost:8080",
     "example.com",
     "cdn.jsdelivr.net"
   ],

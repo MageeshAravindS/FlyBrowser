@@ -1,7 +1,12 @@
 {
-  "examUrl": "https://google.com",
+  "examUrl": "http://localhost:8080/student-login.html",
   "allowedDomains": [
-    "google.com"
+    "localhost",
+    "127.0.0.1",
+    "accounts.google.com",
+    "google.com",
+    "googleapis.com",
+    "gstatic.com"
   ],
   "focusMonitoring": {
     "warningThreshold": 2,

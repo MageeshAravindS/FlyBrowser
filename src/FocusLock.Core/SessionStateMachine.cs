@@ -125,23 +125,25 @@ public class SessionStateMachine
         {
             (SessionState.Idle, SessionState.Launching) => true,
             (SessionState.Idle, SessionState.Error) => true,
+            (SessionState.Idle, SessionState.Exited) => true,
             (SessionState.Launching, SessionState.Active) => true,
             (SessionState.Launching, SessionState.Error) => true,
+            (SessionState.Launching, SessionState.Exited) => true,
             (SessionState.Active, SessionState.Warning) => true,
             (SessionState.Active, SessionState.Terminated) => true,
             (SessionState.Active, SessionState.Completed) => true,
             (SessionState.Active, SessionState.Error) => true,
+            (SessionState.Active, SessionState.Exited) => true,
             (SessionState.Warning, SessionState.Active) => true,
             (SessionState.Warning, SessionState.Terminated) => true,
             (SessionState.Warning, SessionState.Completed) => true,
             (SessionState.Warning, SessionState.Error) => true,
+            (SessionState.Warning, SessionState.Exited) => true,
             (SessionState.Terminated, SessionState.Idle) => true,
             (SessionState.Terminated, SessionState.Exited) => true,
             (SessionState.Completed, SessionState.Exited) => true,
             (SessionState.Error, SessionState.Exited) => true,
-            (SessionState.Active, SessionState.Exited) => true,
-            (SessionState.Warning, SessionState.Exited) => true,
-            (SessionState.Launching, SessionState.Exited) => true,
+            (_, SessionState.Exited) => true,
             _ => false
         };
     }

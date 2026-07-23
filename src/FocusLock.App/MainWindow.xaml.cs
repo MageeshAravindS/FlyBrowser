@@ -30,6 +30,9 @@ public partial class MainWindow : Window
     private readonly TerminatedView _terminatedView;
     private readonly CompletionView _completionView;
     private readonly ErrorView _errorView;
+    private readonly LoginPromptView _loginPromptView;
+    private System.Windows.Threading.DispatcherTimer? _loginPollTimer;
+    private static readonly System.Net.Http.HttpClient _httpClient = new();
 
     public MainWindow(FocusLockConfig config, LoggingService loggingService, SessionStateMachine stateMachine)
     {
@@ -44,14 +47,24 @@ public partial class MainWindow : Window
             _config.ExitAuthorization.KeySequence
         );
 
-        Title = _config.Ui.Branding.AppName;
+        Title = "FlyLock Browser - Student Login";
         Topmost = false;
-        WindowStyle = WindowStyle.None;
-        WindowState = WindowState.Maximized;
+        WindowStyle = WindowStyle.SingleBorderWindow;
+        WindowState = WindowState.Normal;
+        Width = 520;
+        Height = 680;
+        WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        ResizeMode = ResizeMode.NoResize;
 
         _homeView = new HomeView();
         _homeView.SetAppName(_config.Ui.Branding.AppName);
-        _homeView.CodeSubmitted += (s, code) => StartExamFromHome(code);
+        _homeView.ExamSubmitted += (s, args) => StartExamFromHome(args.Code, args.StudentEmail);
+        _homeView.CodeSubmitted += (s, code) => StartExamFromHome(code, "");
+        _homeView.SwitchAccountRequested += OnSwitchAccountRequested;
+
+        _loginPromptView = new LoginPromptView();
+        _loginPromptView.OpenBrowserRequested += (s, e) => LaunchDefaultBrowserForLogin();
+        _loginPromptView.CheckLoginRequested += async (s, e) => await CheckLoginStatusAsync();
 
         _loadingView = new LoadingView();
         _terminatedView = new TerminatedView();
@@ -83,6 +96,38 @@ public partial class MainWindow : Window
 
         try
         {
+            _browserHost = new BrowserHostControl(_config, _loggingService);
+            _browserHost.PageLoaded += BrowserHost_PageLoaded;
+            _browserHost.PageLoadFailed += BrowserHost_PageLoadFailed;
+            _browserHost.AddressChanged += (s, url) => OnBrowserAddressChanged(url);
+            _browserHost.EscapeKeyPressed += (s, ev) => Dispatcher.Invoke(PromptProctorExit);
+
+            BrowserContainer.Content = _browserHost;
+        }
+        catch (Exception ex)
+        {
+            _loggingService.Log("CefInitError", new { error = ex.ToString() });
+        }
+
+        // Check if student session is saved locally
+        string? savedEmail = StudentSessionStorage.GetSavedEmail();
+        if (!string.IsNullOrEmpty(savedEmail))
+        {
+            _loggingService.Log("PersistentSessionLoaded", new { email = savedEmail });
+            EnterFullscreenLockdownMode(savedEmail);
+        }
+        else
+        {
+            ShowLoginPrompt();
+        }
+    }
+
+    private void StartLockdownHooks()
+    {
+        if (_keyboardHook != null) return;
+
+        try
+        {
             _touchpadManager = new TouchpadManager();
             _touchpadManager.DisableGestures();
         }
@@ -104,41 +149,160 @@ public partial class MainWindow : Window
         {
             _loggingService.Log("KeyboardHookError", new { error = ex.Message });
         }
+    }
 
-        OverlayContainer.Content = _homeView;
-        OverlayContainer.Visibility = Visibility.Visible;
-        BrowserContainer.Visibility = Visibility.Collapsed;
-        BrowserContainer.IsHitTestVisible = false;
+    private string _authenticatedStudentEmail = string.Empty;
 
+    private void OnBrowserAddressChanged(string url)
+    {
+        if (string.IsNullOrEmpty(url)) return;
+
+        if (url.Contains("/login-success"))
+        {
+            string email = "student@bitsathy.ac.in";
+            if (url.Contains("email="))
+            {
+                email = Uri.UnescapeDataString(url.Split("email=")[1].Split('&')[0].Split('#')[0]);
+            }
+            EnterFullscreenLockdownMode(email);
+        }
+    }
+
+    private void EnterFullscreenLockdownMode(string email)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            _authenticatedStudentEmail = email;
+            _homeView.SetStudentEmail(email);
+
+            // Activate low-level security lockdown hooks only after successful login
+            StartLockdownHooks();
+
+            // Upgrade window to Fullscreen Lockdown Mode
+            WindowStyle = WindowStyle.None;
+            WindowState = WindowState.Maximized;
+            Topmost = true;
+
+            OverlayContainer.Content = _homeView;
+            OverlayContainer.Visibility = Visibility.Visible;
+            BrowserContainer.Visibility = Visibility.Collapsed;
+            BrowserContainer.IsHitTestVisible = false;
+
+            ReassertTopmost();
+            _homeView.FocusAccessCodeInput();
+        });
+    }
+
+    private void ShowLoginPrompt()
+    {
+        Dispatcher.Invoke(() =>
+        {
+            WindowStyle = WindowStyle.SingleBorderWindow;
+            WindowState = WindowState.Normal;
+            Topmost = false;
+            Width = 520;
+            Height = 680;
+            WindowStartupLocation = WindowStartupLocation.CenterScreen;
+
+            OverlayContainer.Content = _loginPromptView;
+            OverlayContainer.Visibility = Visibility.Visible;
+            BrowserContainer.Visibility = Visibility.Collapsed;
+
+            LaunchDefaultBrowserForLogin();
+            StartLoginPollingTimer();
+        });
+    }
+
+    private void LaunchDefaultBrowserForLogin()
+    {
         try
         {
-            _browserHost = new BrowserHostControl(_config, _loggingService);
-            _browserHost.PageLoaded += BrowserHost_PageLoaded;
-            _browserHost.PageLoadFailed += BrowserHost_PageLoadFailed;
-            _browserHost.EscapeKeyPressed += (s, ev) => Dispatcher.Invoke(PromptProctorExit);
-
-            BrowserContainer.Content = _browserHost;
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "http://localhost:8080/student-login.html",
+                UseShellExecute = true
+            };
+            System.Diagnostics.Process.Start(psi);
         }
         catch (Exception ex)
         {
-            _loggingService.Log("CefInitError", new { error = ex.ToString() });
-            ShowError($"Failed to initialize Chromium Browser engine: {ex.Message}");
+            _loggingService.Log("LaunchBrowserError", new { error = ex.Message });
         }
+    }
+
+    private void StartLoginPollingTimer()
+    {
+        if (_loginPollTimer != null)
+        {
+            _loginPollTimer.Stop();
+        }
+
+        _loginPollTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(1.5)
+        };
+        _loginPollTimer.Tick += async (s, e) =>
+        {
+            await CheckLoginStatusAsync();
+        };
+        _loginPollTimer.Start();
+    }
+
+    private async System.Threading.Tasks.Task CheckLoginStatusAsync()
+    {
+        try
+        {
+            var res = await _httpClient.GetAsync("http://localhost:8080/api/v1/auth/student-me");
+            if (res.IsSuccessStatusCode)
+            {
+                var json = await res.Content.ReadAsStringAsync();
+                using var doc = System.Text.Json.JsonDocument.Parse(json);
+                if (doc.RootElement.TryGetProperty("student", out var studentElem) && studentElem.ValueKind != System.Text.Json.JsonValueKind.Null)
+                {
+                    if (studentElem.TryGetProperty("email", out var emailElem))
+                    {
+                        string? email = emailElem.GetString();
+                        if (!string.IsNullOrEmpty(email) && email.EndsWith("@bitsathy.ac.in"))
+                        {
+                            _loginPollTimer?.Stop();
+                            StudentSessionStorage.SaveEmail(email);
+                            EnterFullscreenLockdownMode(email);
+                        }
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Ignore network poll errors during startup
+        }
+    }
+
+    private void OnSwitchAccountRequested(object? sender, EventArgs e)
+    {
+        StudentSessionStorage.ClearSession();
+        _authenticatedStudentEmail = string.Empty;
+        ShowLoginPrompt();
     }
 
     private void MainWindow_Activated(object? sender, EventArgs e)
     {
         if (_stateMachine.CurrentState == SessionState.Idle)
         {
-            Topmost = false;
-            ReassertTopmost();
-            _homeView.FocusAccessCodeInput();
+            if (!string.IsNullOrEmpty(_authenticatedStudentEmail))
+            {
+                Topmost = false;
+                ReassertTopmost();
+                _homeView.FocusAccessCodeInput();
+            }
         }
     }
 
-    private void StartExamFromHome(string accessCode)
+    private void StartExamFromHome(string accessCode, string studentEmail = "")
     {
-        _loggingService.Log("ExamCodeSubmitted", new { code = accessCode });
+        accessCode = (accessCode ?? string.Empty).Trim();
+        studentEmail = (studentEmail ?? string.Empty).Trim().ToLower();
+        _loggingService.Log("ExamCodeSubmitted", new { code = accessCode, email = studentEmail });
         OverlayContainer.Content = _loadingView;
         
         if (_focusMonitor != null)
@@ -146,8 +310,21 @@ public partial class MainWindow : Window
             _focusMonitor.IsPaused = false;
         }
 
-        _stateMachine.TransitionTo(SessionState.Launching, $"Access code submitted ({accessCode})");
-        _browserHost?.LoadUrl(_config.ExamUrl);
+        _stateMachine.TransitionTo(SessionState.Launching, $"Access code submitted ({accessCode}) for {studentEmail}");
+
+        string baseUrl = "http://localhost:8080";
+        if (!string.IsNullOrEmpty(_config.ExamUrl) && Uri.TryCreate(_config.ExamUrl, UriKind.Absolute, out var baseUri))
+        {
+            baseUrl = $"{baseUri.Scheme}://{baseUri.Authority}";
+        }
+
+        string targetUrl = $"{baseUrl}/assessment/{Uri.EscapeDataString(accessCode)}";
+        if (!string.IsNullOrEmpty(studentEmail))
+        {
+            targetUrl += $"?email={Uri.EscapeDataString(studentEmail)}";
+        }
+
+        _browserHost?.LoadUrl(targetUrl);
     }
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
@@ -299,6 +476,7 @@ public partial class MainWindow : Window
         {
             _loggingService.Log("ProctorExitAuthenticated", new { sessionId = _stateMachine.SessionId });
             _stateMachine.AuthorizeExit("Proctor exit sequence authenticated");
+            CloseApplication("Proctor exit sequence authenticated");
         }
         else
         {

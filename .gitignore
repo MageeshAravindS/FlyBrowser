@@ -8,3 +8,5 @@ obj/
 .vs/
 .idea/
 .vscode/
+*_wpftmp.csproj
+*.db

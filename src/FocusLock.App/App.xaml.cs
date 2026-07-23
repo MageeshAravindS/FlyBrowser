@@ -87,6 +87,8 @@ public partial class App : Application
         string appDataPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FocusLock", "CefCache");
         settings.CachePath = appDataPath;
 
+        settings.UserAgent = "FlyLockBrowser/1.0 (Windows NT 10.0; Win64; x64) FocusLockKiosk/1.0";
+
         settings.CefCommandLineArgs.Add("disable-devtools", "1");
         settings.CefCommandLineArgs.Add("disable-extensions", "1");
 

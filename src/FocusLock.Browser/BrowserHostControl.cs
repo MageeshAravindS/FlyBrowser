@@ -18,6 +18,7 @@ public class BrowserHostControl : UserControl
 
     public event EventHandler? PageLoaded;
     public event EventHandler<string>? PageLoadFailed;
+    public event EventHandler<string>? AddressChanged;
     public event EventHandler? EscapeKeyPressed;
 
     public ChromiumWebBrowser? ChromiumBrowser => _browser;
@@ -59,6 +60,19 @@ public class BrowserHostControl : UserControl
         _browser.LifeSpanHandler = new LifeSpanHandler(loggingService);
         _browser.RequestHandler = new RequestHandler(config.AllowedDomains, loggingService);
         _browser.DisplayHandler = new DisplayHandler();
+        _browser.JsDialogHandler = new JsDialogHandler(loggingService);
+
+        _browser.AddressChanged += (s, e) =>
+        {
+            Dispatcher.Invoke(() =>
+            {
+                string newUrl = e.NewValue?.ToString() ?? _browser?.Address ?? string.Empty;
+                if (!string.IsNullOrEmpty(newUrl))
+                {
+                    AddressChanged?.Invoke(this, newUrl);
+                }
+            });
+        };
 
         _browser.LoadingStateChanged += (s, e) =>
         {
@@ -75,6 +89,12 @@ public class BrowserHostControl : UserControl
 
         _browser.LoadError += (s, e) =>
         {
+            if (e.ErrorCode == CefErrorCode.Aborted)
+            {
+                // ERR_ABORTED occurs during redirects or when a new navigation replaces an ongoing request. Ignore.
+                return;
+            }
+
             Dispatcher.Invoke(() =>
             {
                 loggingService?.Log("NavigationFailed", new { url = e.FailedUrl, errorCode = e.ErrorCode, errorText = e.ErrorText });

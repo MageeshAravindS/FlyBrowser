@@ -23,8 +23,23 @@
                 <TextBlock Text="Enter your Assessment Access Code below to begin your exam session." 
                            TextWrapping="Wrap" TextAlignment="Center" FontSize="13" Foreground="#475569" LineHeight="20" Margin="0,0,0,28"/>
 
+                <!-- Authenticated Google Student Email Badge -->
+                <Border Background="#ECFDF5" BorderBrush="#10B981" BorderThickness="1.5" Padding="12,10" Margin="0,0,0,20">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Orientation="Vertical">
+                            <TextBlock Text="AUTHENTICATED STUDENT" FontSize="10" FontWeight="Bold" Foreground="#047857"/>
+                            <TextBlock x:Name="TxtStudentBadge" Text="Google Verified Account" FontSize="13" FontWeight="Bold" Foreground="#065F46" Margin="0,2,0,0"/>
+                        </StackPanel>
+                        <Button x:Name="BtnSwitchAccount" Grid.Column="1" Click="BtnSwitchAccount_Click" Content="Switch Account" FontSize="11" FontWeight="Bold" Foreground="#2563EB" Background="Transparent" BorderThickness="0" Cursor="Hand" VerticalAlignment="Center"/>
+                    </Grid>
+                </Border>
+
                 <!-- Code Input Field -->
-                <TextBlock Text="ACCESS CODE" FontSize="11" FontWeight="Bold" Foreground="#0F172A" Margin="0,0,0,8"/>
+                <TextBlock Text="ACCESS CODE" FontSize="11" FontWeight="Bold" Foreground="#0F172A" Margin="0,0,0,6"/>
                 <Border Background="#F1F5F9" CornerRadius="0" BorderBrush="#0F172A" BorderThickness="2" Padding="12,10" Margin="0,0,0,16">
                     <TextBox x:Name="TxtAccessCode" 
                              Background="Transparent" BorderThickness="0" 
