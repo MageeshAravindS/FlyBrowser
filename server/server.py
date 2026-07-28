@@ -173,14 +173,19 @@ def init_db():
     conn.close()
 
 def log_audit(event_type, actor, exam_code=None, session_id=None, details=None):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("""
-    INSERT INTO audit_logs (event_type, actor, exam_code, session_id, details)
-    VALUES (?, ?, ?, ?, ?)
-    """, (event_type, actor, exam_code, session_id, details))
-    conn.commit()
-    conn.close()
+    if not actor:
+        actor = 'system@bitsathy.ac.in'
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("""
+        INSERT INTO audit_logs (event_type, actor, exam_code, session_id, details)
+        VALUES (?, ?, ?, ?, ?)
+        """, (event_type, str(actor), exam_code, session_id, details))
+        conn.commit()
+        conn.close()
+    except Exception as ex:
+        print(f"[AUDIT LOG WARNING] Failed to record audit log: {ex}")
 
 def parse_cookies(cookie_header):
     cookies = {}
@@ -1047,166 +1052,7 @@ class FlyLockHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                     "message": f"Published assessment '{title}' with PIN code: {exam_code}!"
                 })
 
-            # 4. Student Exam Session Actions
-            elif path.startswith("/api/v1/assessments/"):
-                sub = path[len("/api/v1/assessments/"):]
-                
-                # Append CSV to existing assessment
-                if sub.endswith("/import-csv"):
-                    user = self.authenticate_user()
-                    if not user or user['role'] not in ('creator', 'admin'):
-                        return self.send_json({"error": "Unauthorized"}, status=403)
-
-                    match = re.search(r'/api/v1/assessments/(\d+)/import-csv', path)
-                    if not match:
-                        return self.send_json({"error": "Invalid endpoint path"}, status=400)
-                    assessment_id = int(match.group(1))
-
-                    conn = get_db()
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT * FROM assessments WHERE id = ?", (assessment_id,))
-                    ass = cursor.fetchone()
-                    if not ass:
-                        conn.close()
-                        return self.send_json({"error": "Assessment not found"}, status=404)
-
-                    csv_text = body.get("csvContent", "")
-                    if csv_text.startswith('\ufeff'):
-                        csv_text = csv_text[1:]
-
-                    import csv
-                    import io
-                    reader = list(csv.reader(io.StringIO(csv_text)))
-                    if not reader or len(reader) < 2:
-                        conn.close()
-                        return self.send_json({"error": "CSV file must contain a header row and at least one data row."}, status=400)
-
-                    headers = [h.strip() for h in reader[0]]
-                    question_col = -1
-                    answer_col = -1
-                    reason_col = -1
-                    option_cols = []
-
-                    for i, h in enumerate(headers):
-                        h_lower = h.lower()
-                        if h_lower in ('question', 'question text'):
-                            question_col = i
-                        elif h_lower in ('answer', 'correct answer'):
-                            answer_col = i
-                        elif h_lower in ('reason', 'explanation'):
-                            reason_col = i
-                        elif re.match(r'^option\s*\d+$', h_lower):
-                            option_cols.append((i, h))
-
-                    if question_col == -1 or answer_col == -1 or not option_cols:
-                        conn.close()
-                        return self.send_json({"error": "CSV header format mismatch. Must contain 'Question', 'Answer', and 'Option 1', 'Option 2', etc."}, status=400)
-
-                    cursor.execute("SELECT MAX(order_index) FROM questions WHERE assessment_id = ?", (assessment_id,))
-                    max_idx_row = cursor.fetchone()
-                    start_order_idx = (max_idx_row[0] or 0) + 1
-
-                    parsed_questions = []
-                    validation_errors = []
-
-                    for row_num, row in enumerate(reader[1:], start=2):
-                        if not any(row):
-                            continue
-                        q_text = row[question_col].strip() if question_col < len(row) else ""
-                        ans_text = row[answer_col].strip() if answer_col < len(row) else ""
-                        reason_text = row[reason_col].strip() if (reason_col != -1 and reason_col < len(row)) else ""
-
-                        def sanitize_cell(val):
-                            if val and val[0] in ('=', '+', '-', '@'):
-                                return "'" + val
-                            return val
-
-                        q_text = sanitize_cell(q_text)
-                        ans_text = sanitize_cell(ans_text)
-                        reason_text = sanitize_cell(reason_text)
-
-                        if not q_text:
-                            validation_errors.append({"row": row_num, "message": "Question text is blank."})
-                            continue
-
-                        row_options = []
-                        for col_idx, col_name in option_cols:
-                            if col_idx < len(row):
-                                opt_val = sanitize_cell(row[col_idx].strip())
-                                if opt_val:
-                                    row_options.append(opt_val)
-
-                        if len(row_options) < 2:
-                            validation_errors.append({"row": row_num, "message": f"Question has fewer than 2 populated options ({len(row_options)} found)."})
-                            continue
-
-                        correct_indices = []
-                        matched = False
-                        ans_upper = ans_text.upper()
-
-                        if len(ans_upper) == 1 and 'A' <= ans_upper <= 'Z':
-                            target_idx = ord(ans_upper) - ord('A')
-                            if target_idx < len(row_options):
-                                correct_indices.append(target_idx)
-                                matched = True
-
-                        if not matched and ans_upper.isdigit():
-                            target_idx = int(ans_upper) - 1
-                            if 0 <= target_idx < len(row_options):
-                                correct_indices.append(target_idx)
-                                matched = True
-
-                        if not matched:
-                            for opt_i, opt_t in enumerate(row_options):
-                                if opt_t.lower() == ans_text.lower():
-                                    correct_indices.append(opt_i)
-                                    matched = True
-                                    break
-
-                        if not matched:
-                            validation_errors.append({"row": row_num, "message": f"Answer '{ans_text}' does not match any option for this row."})
-                            continue
-
-                        parsed_questions.append({
-                            "text": q_text,
-                            "reason": reason_text,
-                            "options": [{"text": opt_t, "is_correct": (i in correct_indices)} for i, opt_t in enumerate(row_options)]
-                        })
-
-                    if validation_errors:
-                        conn.close()
-                        return self.send_json({
-                            "success": False,
-                            "error": "CSV Validation Failed",
-                            "report": validation_errors,
-                            "parsedCount": len(parsed_questions)
-                        }, status=422)
-
-                    for offset, q in enumerate(parsed_questions):
-                        q_order = start_order_idx + offset
-                        cursor.execute("""
-                        INSERT INTO questions (assessment_id, order_index, text, reason)
-                        VALUES (?, ?, ?, ?)
-                        """, (assessment_id, q_order, q['text'], q['reason']))
-                        q_id = cursor.lastrowid
-                        for o_idx, opt in enumerate(q['options'], start=1):
-                            cursor.execute("""
-                            INSERT INTO options (question_id, order_index, text, is_correct)
-                            VALUES (?, ?, ?, ?)
-                            """, (q_id, o_idx, opt['text'], 1 if opt['is_correct'] else 0))
-
-                    conn.commit()
-                    conn.close()
-
-                    log_audit("CSV_IMPORTED", user['email'], details=f"Successfully imported {len(parsed_questions)} questions into assessment ID {assessment_id}.")
-
-                    return self.send_json({
-                        "success": True,
-                        "importedCount": len(parsed_questions),
-                        "message": f"Successfully imported {len(parsed_questions)} questions from CSV!"
-                    })
-
-            # 5b. Create New Assessment from CSV (`/api/v1/assessments/import-csv-new`)
+            # 3b. Create New Assessment from CSV (`/api/v1/assessments/import-csv-new`)
             elif path == "/api/v1/assessments/import-csv-new":
                 user = self.authenticate_user()
                 if not user or user['role'] not in ('creator', 'admin'):
@@ -1373,6 +1219,165 @@ class FlyLockHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                     "importedCount": len(parsed_questions),
                     "message": f"Published assessment '{title}' ({exam_code}) with {len(parsed_questions)} questions!"
                 })
+
+            # 4. Student Exam Session Actions
+            elif path.startswith("/api/v1/assessments/"):
+                sub = path[len("/api/v1/assessments/"):]
+                
+                # Append CSV to existing assessment
+                if sub.endswith("/import-csv"):
+                    user = self.authenticate_user()
+                    if not user or user['role'] not in ('creator', 'admin'):
+                        return self.send_json({"error": "Unauthorized"}, status=403)
+
+                    match = re.search(r'/api/v1/assessments/(\d+)/import-csv', path)
+                    if not match:
+                        return self.send_json({"error": "Invalid endpoint path"}, status=400)
+                    assessment_id = int(match.group(1))
+
+                    conn = get_db()
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT * FROM assessments WHERE id = ?", (assessment_id,))
+                    ass = cursor.fetchone()
+                    if not ass:
+                        conn.close()
+                        return self.send_json({"error": "Assessment not found"}, status=404)
+
+                    csv_text = body.get("csvContent", "")
+                    if csv_text.startswith('\ufeff'):
+                        csv_text = csv_text[1:]
+
+                    import csv
+                    import io
+                    reader = list(csv.reader(io.StringIO(csv_text)))
+                    if not reader or len(reader) < 2:
+                        conn.close()
+                        return self.send_json({"error": "CSV file must contain a header row and at least one data row."}, status=400)
+
+                    headers = [h.strip() for h in reader[0]]
+                    question_col = -1
+                    answer_col = -1
+                    reason_col = -1
+                    option_cols = []
+
+                    for i, h in enumerate(headers):
+                        h_lower = h.lower()
+                        if h_lower in ('question', 'question text'):
+                            question_col = i
+                        elif h_lower in ('answer', 'correct answer'):
+                            answer_col = i
+                        elif h_lower in ('reason', 'explanation'):
+                            reason_col = i
+                        elif re.match(r'^option\s*\d+$', h_lower):
+                            option_cols.append((i, h))
+
+                    if question_col == -1 or answer_col == -1 or not option_cols:
+                        conn.close()
+                        return self.send_json({"error": "CSV header format mismatch. Must contain 'Question', 'Answer', and 'Option 1', 'Option 2', etc."}, status=400)
+
+                    cursor.execute("SELECT MAX(order_index) FROM questions WHERE assessment_id = ?", (assessment_id,))
+                    max_idx_row = cursor.fetchone()
+                    start_order_idx = (max_idx_row[0] or 0) + 1
+
+                    parsed_questions = []
+                    validation_errors = []
+
+                    for row_num, row in enumerate(reader[1:], start=2):
+                        if not any(row):
+                            continue
+                        q_text = row[question_col].strip() if question_col < len(row) else ""
+                        ans_text = row[answer_col].strip() if answer_col < len(row) else ""
+                        reason_text = row[reason_col].strip() if (reason_col != -1 and reason_col < len(row)) else ""
+
+                        def sanitize_cell(val):
+                            if val and val[0] in ('=', '+', '-', '@'):
+                                return "'" + val
+                            return val
+
+                        q_text = sanitize_cell(q_text)
+                        ans_text = sanitize_cell(ans_text)
+                        reason_text = sanitize_cell(reason_text)
+
+                        if not q_text:
+                            validation_errors.append({"row": row_num, "message": "Question text is blank."})
+                            continue
+
+                        row_options = []
+                        for col_idx, col_name in option_cols:
+                            if col_idx < len(row):
+                                opt_val = sanitize_cell(row[col_idx].strip())
+                                if opt_val:
+                                    row_options.append(opt_val)
+
+                        if len(row_options) < 2:
+                            validation_errors.append({"row": row_num, "message": f"Question has fewer than 2 populated options ({len(row_options)} found)."})
+                            continue
+
+                        correct_indices = []
+                        matched = False
+                        ans_upper = ans_text.upper()
+
+                        if len(ans_upper) == 1 and 'A' <= ans_upper <= 'Z':
+                            target_idx = ord(ans_upper) - ord('A')
+                            if target_idx < len(row_options):
+                                correct_indices.append(target_idx)
+                                matched = True
+
+                        if not matched and ans_upper.isdigit():
+                            target_idx = int(ans_upper) - 1
+                            if 0 <= target_idx < len(row_options):
+                                correct_indices.append(target_idx)
+                                matched = True
+
+                        if not matched:
+                            for opt_i, opt_t in enumerate(row_options):
+                                if opt_t.lower() == ans_text.lower():
+                                    correct_indices.append(opt_i)
+                                    matched = True
+                                    break
+
+                        if not matched:
+                            validation_errors.append({"row": row_num, "message": f"Answer '{ans_text}' does not match any option for this row."})
+                            continue
+
+                        parsed_questions.append({
+                            "text": q_text,
+                            "reason": reason_text,
+                            "options": [{"text": opt_t, "is_correct": (i in correct_indices)} for i, opt_t in enumerate(row_options)]
+                        })
+
+                    if validation_errors:
+                        conn.close()
+                        return self.send_json({
+                            "success": False,
+                            "error": "CSV Validation Failed",
+                            "report": validation_errors,
+                            "parsedCount": len(parsed_questions)
+                        }, status=422)
+
+                    for offset, q in enumerate(parsed_questions):
+                        q_order = start_order_idx + offset
+                        cursor.execute("""
+                        INSERT INTO questions (assessment_id, order_index, text, reason)
+                        VALUES (?, ?, ?, ?)
+                        """, (assessment_id, q_order, q['text'], q['reason']))
+                        q_id = cursor.lastrowid
+                        for o_idx, opt in enumerate(q['options'], start=1):
+                            cursor.execute("""
+                            INSERT INTO options (question_id, order_index, text, is_correct)
+                            VALUES (?, ?, ?, ?)
+                            """, (q_id, o_idx, opt['text'], 1 if opt['is_correct'] else 0))
+
+                    conn.commit()
+                    conn.close()
+
+                    log_audit("CSV_IMPORTED", user['email'], details=f"Successfully imported {len(parsed_questions)} questions into assessment ID {assessment_id}.")
+
+                    return self.send_json({
+                        "success": True,
+                        "importedCount": len(parsed_questions),
+                        "message": f"Successfully imported {len(parsed_questions)} questions from CSV!"
+                    })
 
             # 5c. Assessment Toggle Active / Update (`/api/v1/assessments/:id/update`)
             elif path.endswith("/update"):
