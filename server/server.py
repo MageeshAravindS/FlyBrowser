@@ -153,62 +153,21 @@ def init_db():
     )
     """)
     
-    # Seed default Admin and Allowlist if empty
-    cursor.execute("SELECT COUNT(*) FROM users WHERE role='admin'")
-    if cursor.fetchone()[0] == 0:
-        cursor.execute("INSERT INTO users (email, role) VALUES ('admin@bitsathy.ac.in', 'admin')")
-        cursor.execute("INSERT INTO users (email, role) VALUES ('prof.smith@bitsathy.ac.in', 'creator')")
-        cursor.execute("INSERT INTO creator_allowlist (email, added_by) VALUES ('prof.smith@bitsathy.ac.in', 'admin@bitsathy.ac.in')")
-        cursor.execute("INSERT INTO creator_allowlist (email, added_by) VALUES ('dr.jones@bitsathy.ac.in', 'admin@bitsathy.ac.in')")
-        
-        # Seed sample 5-digit PIN assessments
+    # Purge placeholder debugging accounts if they exist in legacy DB
+    cursor.execute("DELETE FROM users WHERE email IN ('admin@bitsathy.ac.in', 'prof.smith@bitsathy.ac.in')")
+    cursor.execute("DELETE FROM creator_allowlist WHERE email IN ('prof.smith@bitsathy.ac.in', 'dr.jones@bitsathy.ac.in') OR added_by = 'admin@bitsathy.ac.in'")
+    conn.commit()
+    
+    # Ensure system user exists
+    cursor.execute("SELECT id FROM users WHERE role='admin' LIMIT 1")
+    admin_row = cursor.fetchone()
+    if not admin_row:
+        cursor.execute("INSERT INTO users (email, role) VALUES ('system@bitsathy.ac.in', 'admin')")
         cursor.execute("""
-        INSERT INTO assessments (exam_code, title, description, duration_minutes, created_by)
-        VALUES ('84920', 'CS101: Systems Programming Final Exam', 'Comprehensive assessment covering memory management, process isolation, and security protocols.', 45, 1)
+        INSERT INTO audit_logs (event_type, actor, details)
+        VALUES ('SYSTEM_INIT', 'system', 'FlyLock Assessment Portal production database initialized.')
         """)
-        assessment_id = cursor.lastrowid
-
-        cursor.execute("""
-        INSERT INTO assessments (exam_code, title, description, duration_minutes, created_by)
-        VALUES ('58291', 'EC202: Computer Networks & Communications', 'Midterm assessment on OSI layer protocols, TCP congestion, and wireless security.', 60, 1)
-        """)
-        assessment_id2 = cursor.lastrowid
-        
-        # Question 1
-        cursor.execute("""
-        INSERT INTO questions (assessment_id, order_index, text, reason)
-        VALUES (?, 1, 'Which component enforces single-use token redemption in FlyLock Assessment Portal?', 'Single-use nonces checked against database prevent replay attacks.')
-        """, (assessment_id,))
-        q1_id = cursor.lastrowid
-        cursor.execute("INSERT INTO options (question_id, order_index, text, is_correct) VALUES (?, 1, 'User-Agent header inspection', 0)", (q1_id,))
-        cursor.execute("INSERT INTO options (question_id, order_index, text, is_correct) VALUES (?, 2, 'Single-use launch token nonce verification', 1)", (q1_id,))
-        cursor.execute("INSERT INTO options (question_id, order_index, text, is_correct) VALUES (?, 3, 'Client side LocalStorage flag', 0)", (q1_id,))
-        cursor.execute("INSERT INTO options (question_id, order_index, text, is_correct) VALUES (?, 4, 'Browser window title checking', 0)", (q1_id,))
-
-        # Question 2
-        cursor.execute("""
-        INSERT INTO questions (assessment_id, order_index, text, reason)
-        VALUES (?, 2, 'What happens if a student attempts to launch an assessment that is already submitted?', 'Re-entry after submission is explicitly rejected to preserve assessment integrity.')
-        """, (assessment_id,))
-        q2_id = cursor.lastrowid
-        cursor.execute("INSERT INTO options (question_id, order_index, text, is_correct) VALUES (?, 1, 'A new attempt is created automatically', 0)", (q2_id,))
-        cursor.execute("INSERT INTO options (question_id, order_index, text, is_correct) VALUES (?, 2, 'The server rejects launch token issuance with an attempt status conflict', 1)", (q2_id,))
-        cursor.execute("INSERT INTO options (question_id, order_index, text, is_correct) VALUES (?, 3, 'The student is granted read-only access to previous answers', 0)", (q2_id,))
-
-        # Question 3
-        cursor.execute("""
-        INSERT INTO questions (assessment_id, order_index, text, reason)
-        VALUES (?, 3, 'How does the CSV import validator harden against CSV formula injection?', 'Leading characters =, +, -, @ are stripped or prefixed to prevent formula execution in external spreadsheet software.')
-        """, (assessment_id,))
-        q3_id = cursor.lastrowid
-        cursor.execute("INSERT INTO options (question_id, order_index, text, is_correct) VALUES (?, 1, 'By escaping HTML entities', 0)", (q3_id,))
-        cursor.execute("INSERT INTO options (question_id, order_index, text, is_correct) VALUES (?, 2, 'By sanitizing cells starting with =, +, -, or @', 1)", (q3_id,))
-        cursor.execute("INSERT INTO options (question_id, order_index, text, is_correct) VALUES (?, 3, 'By requiring JSON instead of CSV', 0)", (q3_id,))
-
-        cursor.execute("""
-        INSERT INTO audit_logs (event_type, actor, exam_code, details)
-        VALUES ('SYSTEM_INIT', 'system', 'CS101-SECURE', 'FlyLock Assessment Portal initial DB schema initialized with sample security assessment.')
-        """)
+        conn.commit()
         
     conn.commit()
     conn.close()
