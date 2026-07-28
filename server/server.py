@@ -17,12 +17,12 @@ GOOGLE_CLIENT_ID = "556888061468-r7ukjulnh2esht6vrtjqtgs6gim0slhh.apps.googleuse
 LATEST_STUDENT_SESSION = {"email": None, "timestamp": 0}
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn = sqlite3.connect(DB_PATH, timeout=60.0)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.execute("PRAGMA busy_timeout=10000;")
+        conn.execute("PRAGMA busy_timeout=30000;")
     except Exception:
         pass
     return conn
@@ -739,7 +739,6 @@ class FlyLockHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
             conn.close()
 
             log_audit("LAUNCH_TOKEN_REDEEMED", student_id, t_dict['exam_code'], session_id=new_session_cookie, details="Token burned successfully, exam session cookie issued.")
-
             cookie_header = f"flylock_exam_session={new_session_cookie}; Path=/; HttpOnly; SameSite=Lax"
             return self.send_json({"valid": True, "attempt": new_attempt}, headers_dict={"Set-Cookie": cookie_header})
 
@@ -747,75 +746,54 @@ class FlyLockHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_POST(self):
-        parsed = urllib.parse.urlparse(self.path)
-        path = parsed.path.rstrip('/')
-        body = self.read_json_body()
+        try:
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path.rstrip('/')
+            body = self.read_json_body()
 
-        # 1. Launch Token Request (from FlyLock Browser Shell)
-        if path == "/api/v1/sessions/launch":
-            exam_code = body.get("examCode", "").strip()
-            client_id = body.get("clientId", "").strip()
+            # 1. Launch Token Request (from FlyLock Browser Shell)
+            if path == "/api/v1/sessions/launch":
+                exam_code = body.get("examCode", "").strip()
+                client_id = body.get("clientId", "").strip()
 
-            if not exam_code or not client_id:
-                return self.send_json({"error": "examCode and clientId are required"}, status=400)
+                if not exam_code or not client_id:
+                    return self.send_json({"error": "examCode and clientId are required"}, status=400)
 
-            conn = get_db()
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM assessments WHERE exam_code = ? AND is_active = 1", (exam_code,))
-            ass = cursor.fetchone()
-            if not ass:
+                conn = get_db()
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM assessments WHERE exam_code = ? AND is_active = 1", (exam_code,))
+                ass = cursor.fetchone()
+                if not ass:
+                    conn.close()
+                    log_audit("LAUNCH_FAILED", client_id, exam_code, details="Invalid or inactive exam code requested.")
+                    return self.send_json({"error": "Invalid or inactive exam code"}, status=404)
+
+                cursor.execute("SELECT status FROM exam_attempts WHERE exam_code = ? AND student_identifier = ?", (exam_code, client_id))
+                prev_attempt = cursor.fetchone()
+                if prev_attempt and prev_attempt['status'] in ('submitted', 'in_progress', 'terminated'):
+                    conn.close()
+                    log_audit("LAUNCH_BLOCKED", client_id, exam_code, details=f"Launch blocked because student attempt is '{prev_attempt['status']}'")
+                    return self.send_json({
+                        "error": "ATTEMPT_LOCKED",
+                        "message": f"Assessment attempt is already {prev_attempt['status']}. Single-session policy prevents re-entry."
+                    }, status=403)
+
+                nonce = secrets.token_urlsafe(32)
+                expires_at = int(time.time()) + 45
+                cursor.execute("""
+                INSERT INTO launch_tokens (nonce, exam_code, client_id, expires_at)
+                VALUES (?, ?, ?, ?)
+                """, (nonce, exam_code, client_id, expires_at))
+                conn.commit()
                 conn.close()
-                log_audit("LAUNCH_FAILED", client_id, exam_code, details="Invalid or inactive exam code requested.")
-                return self.send_json({"error": "Invalid or inactive exam code"}, status=404)
 
-            cursor.execute("SELECT status FROM exam_attempts WHERE exam_code = ? AND student_identifier = ?", (exam_code, client_id))
-            prev_attempt = cursor.fetchone()
-            if prev_attempt and prev_attempt['status'] in ('submitted', 'in_progress', 'terminated'):
-                conn.close()
-                log_audit("LAUNCH_BLOCKED", client_id, exam_code, details=f"Launch blocked because student attempt is '{prev_attempt['status']}'")
-                return self.send_json({
-                    "error": "ATTEMPT_LOCKED",
-                    "message": f"Assessment attempt is already {prev_attempt['status']}. Single-session policy prevents re-entry."
-                }, status=403)
+                log_audit("LAUNCH_TOKEN_ISSUED", client_id, exam_code, details=f"Issued launch token with 45s TTL (nonce: {nonce[:8]}...)")
+                return self.send_json({"success": True, "launchToken": nonce, "examCode": exam_code, "expiresIn": 45})
 
-            nonce = secrets.token_urlsafe(32)
-            expires_at = int(time.time()) + 45
-            cursor.execute("""
-            INSERT INTO launch_tokens (nonce, exam_code, client_id, expires_at)
-            VALUES (?, ?, ?, ?)
-            """, (nonce, exam_code, client_id, expires_at))
-            conn.commit()
-            conn.close()
-
-            log_audit("LAUNCH_TOKEN_ISSUED", client_id, exam_code, details=f"Issued launch token with 45s TTL (nonce: {nonce[:8]}...)")
-            return self.send_json({"success": True, "launchToken": nonce, "examCode": exam_code, "expiresIn": 45})
-
-        # 2a. Student Login & Authentication Endpoints
-        elif path == "/api/v1/auth/student-login":
-            email = body.get("email", "").strip().lower()
-            if not email or not email.endswith('@bitsathy.ac.in'):
-                return self.send_json({
-                    "error": "INVALID_DOMAIN",
-                    "message": "Student login strictly requires an institutional email ending in @bitsathy.ac.in"
-                }, status=403)
-
-            LATEST_STUDENT_SESSION["email"] = email
-            LATEST_STUDENT_SESSION["timestamp"] = time.time()
-            cookie_header = f"flylock_student_email={email}; Path=/; HttpOnly; SameSite=Lax"
-            log_audit("STUDENT_LOGIN", email, details="Student authenticated with @bitsathy.ac.in email.")
-            return self.send_json({"user": {"email": email, "role": "student"}}, headers_dict={"Set-Cookie": cookie_header})
-
-        elif path == "/api/v1/auth/student-google":
-            id_token = body.get("idToken", "").strip()
-            if not id_token:
-                return self.send_json({"error": "idToken is required"}, status=400)
-            try:
-                import base64
-                parts = id_token.split('.')
-                payload_b64 = parts[1] + '=' * (-len(parts[1]) % 4)
-                claims = json.loads(base64.urlsafe_b64decode(payload_b64).decode('utf-8'))
-                email = claims.get('email', '').lower()
-                if not email.endswith('@bitsathy.ac.in'):
+            # 2a. Student Login & Authentication Endpoints
+            elif path == "/api/v1/auth/student-login":
+                email = body.get("email", "").strip().lower()
+                if not email or not email.endswith('@bitsathy.ac.in'):
                     return self.send_json({
                         "error": "INVALID_DOMAIN",
                         "message": "Student login strictly requires an institutional email ending in @bitsathy.ac.in"
@@ -824,139 +802,62 @@ class FlyLockHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                 LATEST_STUDENT_SESSION["email"] = email
                 LATEST_STUDENT_SESSION["timestamp"] = time.time()
                 cookie_header = f"flylock_student_email={email}; Path=/; HttpOnly; SameSite=Lax"
-                log_audit("STUDENT_GOOGLE_LOGIN", email, details="Student authenticated via Google SSO.")
+                log_audit("STUDENT_LOGIN", email, details="Student authenticated with @bitsathy.ac.in email.")
                 return self.send_json({"user": {"email": email, "role": "student"}}, headers_dict={"Set-Cookie": cookie_header})
-            except Exception as ex:
-                return self.send_json({"error": f"Failed to verify Google Token: {str(ex)}"}, status=400)
-        elif path == "/api/v1/auth/student-logout":
-            cookie_header = "flylock_student_email=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
-            return self.send_json({"success": True}, headers_dict={"Set-Cookie": cookie_header})
 
-        # Student Google SSO Authentication
-        elif path == "/api/v1/auth/student-google":
-            id_token = body.get("credential", "").strip() or body.get("idToken", "").strip() or body.get("token", "").strip()
-            
-            if not id_token:
-                cookies = parse_cookies(self.headers.get('Cookie'))
-                email = cookies.get('flylock_student_email', '')
-                if email and email.endswith('@bitsathy.ac.in'):
-                    return self.send_json({"user": {"email": email, "role": "student"}})
-                return self.send_json({"error": "Google ID token credential is required for verification."}, status=400)
+            elif path == "/api/v1/auth/student-google":
+                id_token = body.get("credential", "").strip() or body.get("idToken", "").strip() or body.get("token", "").strip()
+                
+                if not id_token:
+                    cookies = parse_cookies(self.headers.get('Cookie'))
+                    email = cookies.get('flylock_student_email', '')
+                    if email and email.endswith('@bitsathy.ac.in'):
+                        return self.send_json({"user": {"email": email, "role": "student"}})
+                    return self.send_json({"error": "Google ID token credential is required for verification."}, status=400)
 
-            try:
-                import base64
-                email = ""
-                parts = id_token.split('.')
-                if len(parts) == 3:
-                    payload_b64 = parts[1]
-                    payload_b64 += '=' * (-len(payload_b64) % 4)
-                    payload_bytes = base64.urlsafe_b64decode(payload_b64)
-                    claims = json.loads(payload_bytes.decode('utf-8'))
-                    email = claims.get('email', '').lower()
+                try:
+                    import base64
+                    email = ""
+                    parts = id_token.split('.')
+                    if len(parts) == 3:
+                        payload_b64 = parts[1]
+                        payload_b64 += '=' * (-len(payload_b64) % 4)
+                        payload_bytes = base64.urlsafe_b64decode(payload_b64)
+                        claims = json.loads(payload_bytes.decode('utf-8'))
+                        email = claims.get('email', '').lower()
 
-                if not email and "@" in id_token:
-                    email = id_token.strip().lower()
+                    if not email and "@" in id_token:
+                        email = id_token.strip().lower()
 
-                if not email or not email.endswith('@bitsathy.ac.in'):
+                    if not email or not email.endswith('@bitsathy.ac.in'):
+                        return self.send_json({
+                            "error": "INVALID_DOMAIN",
+                            "message": "Domain Access Blocked: Only institutional accounts ending in @bitsathy.ac.in are allowed."
+                        }, status=403)
+
+                    log_audit("STUDENT_GOOGLE_LOGIN", email, details="Student authenticated via verified Google SSO token.")
+                    cookie_header = f"flylock_student_email={email}; Path=/; HttpOnly; SameSite=Lax"
                     return self.send_json({
-                        "error": "INVALID_DOMAIN",
-                        "message": "Domain Access Blocked: Only institutional accounts ending in @bitsathy.ac.in are allowed."
-                    }, status=403)
+                        "user": {"email": email, "role": "student"}
+                    }, headers_dict={"Set-Cookie": cookie_header})
 
-                log_audit("STUDENT_GOOGLE_LOGIN", email, details="Student authenticated via verified Google SSO token.")
-                cookie_header = f"flylock_student_email={email}; Path=/; HttpOnly; SameSite=Lax"
-                return self.send_json({
-                    "user": {"email": email, "role": "student"}
-                }, headers_dict={"Set-Cookie": cookie_header})
+                except Exception as ex:
+                    return self.send_json({"error": f"Failed to verify Google Token: {str(ex)}"}, status=400)
 
-            except Exception as ex:
-                return self.send_json({"error": f"Failed to verify Google Token: {str(ex)}"}, status=400)
+            elif path == "/api/v1/auth/student-logout":
+                cookie_header = "flylock_student_email=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+                return self.send_json({"success": True}, headers_dict={"Set-Cookie": cookie_header})
 
-        # 2b. Auth Login (Email Domain Check)
-        elif path == "/api/v1/auth/login":
-            email = body.get("email", "").strip().lower()
-            if not email:
-                return self.send_json({"error": "Email is required"}, status=400)
+            # 2b. Auth Login (Email Domain Check)
+            elif path == "/api/v1/auth/login":
+                email = body.get("email", "").strip().lower()
+                if not email:
+                    return self.send_json({"error": "Email is required"}, status=400)
 
-            ALLOWED_DOMAINS = ["bitsathy.ac.in", "flylock.io"]
-            domain = email.split("@")[-1] if "@" in email else ""
+                ALLOWED_DOMAINS = ["bitsathy.ac.in", "flylock.io"]
+                domain = email.split("@")[-1] if "@" in email else ""
 
-            if domain not in ALLOWED_DOMAINS:
-                return self.send_json({
-                    "error": "INVALID_DOMAIN",
-                    "message": "Only institutional emails ending in @bitsathy.ac.in are allowed."
-                }, status=403)
-
-            conn = get_db()
-            cursor = conn.cursor()
-
-            cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
-            user = cursor.fetchone()
-
-            if not user:
-                cursor.execute("SELECT * FROM creator_allowlist WHERE email = ? AND status = 'active'", (email,))
-                allowed = cursor.fetchone()
-                
-                is_bitsathy_email = email.endswith("@bitsathy.ac.in")
-
-                if not allowed and not is_bitsathy_email:
-                    conn.close()
-                    log_audit("LOGIN_REJECTED", email, details="Email not present in Creator Allowlist and not a bitsathy.ac.in email.")
-                    return self.send_json({
-                        "error": "ALLOWLIST_REJECTED",
-                        "message": "Your email has not been approved for assessment creation. Please use your @bitsathy.ac.in email."
-                    }, status=403)
-                
-                cursor.execute("INSERT INTO users (email, role) VALUES (?, 'creator')", (email,))
-                user_id = cursor.lastrowid
-                user_role = 'creator'
-                
-                if is_bitsathy_email and not allowed:
-                    cursor.execute("INSERT INTO creator_allowlist (email, added_by, status) VALUES (?, 'auto-domain', 'active')", (email,))
-            else:
-                user_id = user['id']
-                user_role = user['role']
-
-            new_session_id = secrets.token_hex(24)
-            cursor.execute("UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND revoked_at IS NULL", (user_id,))
-            cursor.execute("INSERT INTO sessions (id, user_id) VALUES (?, ?)", (new_session_id, user_id))
-            cursor.execute("UPDATE users SET active_session_id = ? WHERE id = ?", (new_session_id, user_id))
-
-            conn.commit()
-            conn.close()
-
-            log_audit("USER_LOGIN", email, details=f"User logged in with role '{user_role}'. Previous sessions revoked.")
-
-            cookie_header = f"flylock_user_session={new_session_id}; Path=/; HttpOnly; SameSite=Lax"
-            return self.send_json({
-                "user": {"id": user_id, "email": email, "role": user_role}
-            }, headers_dict={"Set-Cookie": cookie_header})
-
-        # 2b. Google OAuth Login Endpoint
-        elif path == "/api/v1/auth/google":
-            id_token = body.get("idToken", "").strip()
-            if not id_token:
-                return self.send_json({"error": "idToken is required"}, status=400)
-
-            try:
-                import base64
-                parts = id_token.split('.')
-                if len(parts) != 3:
-                    return self.send_json({"error": "Malformed ID token"}, status=400)
-                
-                payload_b64 = parts[1]
-                payload_b64 += '=' * (-len(payload_b64) % 4)
-                payload_bytes = base64.urlsafe_b64decode(payload_b64)
-                claims = json.loads(payload_bytes.decode('utf-8'))
-
-                email = claims.get('email', '').lower()
-                hd = claims.get('hd', '')
-                aud = claims.get('aud', '')
-
-                if aud != GOOGLE_CLIENT_ID:
-                    return self.send_json({"error": "Google Client ID mismatch"}, status=403)
-
-                if not email.endswith('@bitsathy.ac.in') and hd != 'bitsathy.ac.in':
+                if domain not in ALLOWED_DOMAINS:
                     return self.send_json({
                         "error": "INVALID_DOMAIN",
                         "message": "Only institutional emails ending in @bitsathy.ac.in are allowed."
@@ -964,14 +865,30 @@ class FlyLockHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
 
                 conn = get_db()
                 cursor = conn.cursor()
+
                 cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
                 user = cursor.fetchone()
 
                 if not user:
+                    cursor.execute("SELECT * FROM creator_allowlist WHERE email = ? AND status = 'active'", (email,))
+                    allowed = cursor.fetchone()
+                    
+                    is_bitsathy_email = email.endswith("@bitsathy.ac.in")
+
+                    if not allowed and not is_bitsathy_email:
+                        conn.close()
+                        log_audit("LOGIN_REJECTED", email, details="Email not present in Creator Allowlist and not a bitsathy.ac.in email.")
+                        return self.send_json({
+                            "error": "ALLOWLIST_REJECTED",
+                            "message": "Your email has not been approved for assessment creation. Please use your @bitsathy.ac.in email."
+                        }, status=403)
+                    
                     cursor.execute("INSERT INTO users (email, role) VALUES (?, 'creator')", (email,))
                     user_id = cursor.lastrowid
                     user_role = 'creator'
-                    cursor.execute("INSERT INTO creator_allowlist (email, added_by, status) VALUES (?, 'google-sso', 'active')", (email,))
+                    
+                    if is_bitsathy_email and not allowed:
+                        cursor.execute("INSERT INTO creator_allowlist (email, added_by, status) VALUES (?, 'auto-domain', 'active')", (email,))
                 else:
                     user_id = user['id']
                     user_role = user['role']
@@ -984,616 +901,740 @@ class FlyLockHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                 conn.commit()
                 conn.close()
 
-                log_audit("GOOGLE_SSO_LOGIN", email, details=f"User authenticated via Google SSO (@bitsathy.ac.in). Role: {user_role}")
+                log_audit("USER_LOGIN", email, details=f"User logged in with role '{user_role}'. Previous sessions revoked.")
 
                 cookie_header = f"flylock_user_session={new_session_id}; Path=/; HttpOnly; SameSite=Lax"
-                return self.send_json({
-                    "user": {"id": user_id, "email": email, "role": user_role}
-                }, headers_dict={"Set-Cookie": cookie_header})
+                return self.send_json({"user": {"id": user_id, "email": email, "role": user_role}}, headers_dict={"Set-Cookie": cookie_header})
 
-            except Exception as ex:
-                return self.send_json({"error": f"Failed to verify Google Token: {str(ex)}"}, status=400)
+            # 2c. Auth Google SSO (Creator/Admin Portal)
+            elif path == "/api/v1/auth/google":
+                id_token = body.get("credential", "").strip() or body.get("idToken", "").strip() or body.get("token", "").strip()
+                if not id_token:
+                    return self.send_json({"error": "idToken is required"}, status=400)
 
-        # 3. Auth Logout
-        elif path == "/api/v1/auth/logout":
-            cookies = parse_cookies(self.headers.get('Cookie'))
-            session_id = cookies.get('flylock_user_session')
-            if session_id:
+                try:
+                    import base64
+                    email = ""
+                    parts = id_token.split('.')
+                    if len(parts) == 3:
+                        payload_b64 = parts[1]
+                        payload_b64 += '=' * (-len(payload_b64) % 4)
+                        payload_bytes = base64.urlsafe_b64decode(payload_b64)
+                        claims = json.loads(payload_bytes.decode('utf-8'))
+                        email = claims.get('email', '').lower()
+
+                    if not email and "@" in id_token:
+                        email = id_token.strip().lower()
+
+                    if not email or not email.endswith('@bitsathy.ac.in'):
+                        return self.send_json({
+                            "error": "INVALID_DOMAIN",
+                            "message": "Domain Access Blocked: Only institutional accounts ending in @bitsathy.ac.in are allowed."
+                        }, status=403)
+
+                    conn = get_db()
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
+                    user = cursor.fetchone()
+
+                    if not user:
+                        cursor.execute("INSERT INTO users (email, role) VALUES (?, 'creator')", (email,))
+                        user_id = cursor.lastrowid
+                        user_role = 'creator'
+                        cursor.execute("INSERT INTO creator_allowlist (email, added_by, status) VALUES (?, 'auto-domain', 'active')", (email,))
+                    else:
+                        user_id = user['id']
+                        user_role = user['role']
+
+                    new_session_id = secrets.token_hex(24)
+                    cursor.execute("UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND revoked_at IS NULL", (user_id,))
+                    cursor.execute("INSERT INTO sessions (id, user_id) VALUES (?, ?)", (new_session_id, user_id))
+                    cursor.execute("UPDATE users SET active_session_id = ? WHERE id = ?", (new_session_id, user_id))
+
+                    conn.commit()
+                    conn.close()
+
+                    log_audit("GOOGLE_SSO_LOGIN", email, details=f"User logged in via Google SSO with role '{user_role}'.")
+
+                    cookie_header = f"flylock_user_session={new_session_id}; Path=/; HttpOnly; SameSite=Lax"
+                    return self.send_json({"user": {"id": user_id, "email": email, "role": user_role}}, headers_dict={"Set-Cookie": cookie_header})
+
+                except Exception as ex:
+                    return self.send_json({"error": f"Failed to verify Google Token: {str(ex)}"}, status=400)
+
+            # 2d. Auth Logout
+            elif path == "/api/v1/auth/logout":
+                cookies = parse_cookies(self.headers.get('Cookie'))
+                session_id = cookies.get('flylock_user_session')
+                if session_id:
+                    conn = get_db()
+                    cursor = conn.cursor()
+                    cursor.execute("UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE id = ?", (session_id,))
+                    cursor.execute("UPDATE users SET active_session_id = NULL WHERE active_session_id = ?", (session_id,))
+                    conn.commit()
+                    conn.close()
+
+                cookie_header = "flylock_user_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+                return self.send_json({"success": True}, headers_dict={"Set-Cookie": cookie_header})
+
+            # 3. Create Assessment (Manual MCQ Builder)
+            elif path == "/api/v1/assessments/create":
+                user = self.authenticate_user()
+                if not user or user['role'] not in ('creator', 'admin'):
+                    return self.send_json({"error": "Unauthorized"}, status=403)
+
+                title = body.get("title", "").strip()
+                description = body.get("description", "").strip()
+                duration = int(body.get("durationMinutes", 60))
+                exam_code = body.get("examCode", "").strip().upper()
+                questions_data = body.get("questions", [])
+
+                if not title:
+                    return self.send_json({"error": "Assessment Title is required"}, status=400)
+                if not questions_data:
+                    return self.send_json({"error": "At least one question is required"}, status=400)
+
+                if not exam_code:
+                    import random
+                    exam_code = str(random.randint(10000, 99999))
+
                 conn = get_db()
                 cursor = conn.cursor()
-                cursor.execute("UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE id = ?", (session_id,))
+
+                cursor.execute("SELECT id FROM assessments WHERE exam_code = ?", (exam_code,))
+                if cursor.fetchone():
+                    conn.close()
+                    return self.send_json({"error": f"Exam PIN code '{exam_code}' is already in use. Please use a different PIN."}, status=400)
+
+                cursor.execute("""
+                INSERT INTO assessments (exam_code, title, description, duration_minutes, created_by)
+                VALUES (?, ?, ?, ?, ?)
+                """, (exam_code, title, description, duration, user['id']))
+                assessment_id = cursor.lastrowid
+
+                for q_idx, q in enumerate(questions_data, start=1):
+                    q_text = q.get("text", "").strip()
+                    reason = q.get("reason", "").strip()
+                    options = q.get("options", [])
+                    if not q_text or not options:
+                        continue
+
+                    cursor.execute("""
+                    INSERT INTO questions (assessment_id, order_index, text, reason)
+                    VALUES (?, ?, ?, ?)
+                    """, (assessment_id, q_idx, q_text, reason))
+                    question_id = cursor.lastrowid
+
+                    for o_idx, opt in enumerate(options, start=1):
+                        opt_text = opt.get("text", "").strip()
+                        is_correct = 1 if opt.get("isCorrect") else 0
+                        if not opt_text:
+                            continue
+                        cursor.execute("""
+                        INSERT INTO options (question_id, order_index, text, is_correct)
+                        VALUES (?, ?, ?, ?)
+                        """, (question_id, o_idx, opt_text, is_correct))
+
                 conn.commit()
                 conn.close()
-                log_audit("USER_LOGOUT", "user", session_id=session_id, details="User session explicitly revoked.")
-            
-            cookie_header = "flylock_user_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
-            return self.send_json({"success": True}, headers_dict={"Set-Cookie": cookie_header})
 
-        # 4. Create Assessment (Manual MCQ)
-        elif path == "/api/v1/assessments":
-            user = self.authenticate_user()
-            if not user or user['role'] not in ('creator', 'admin'):
-                return self.send_json({"error": "Unauthorized. Creator or Admin role required."}, status=403)
+                log_audit("ASSESSMENT_CREATED", user['email'], exam_code, details=f"Published assessment '{title}' with {len(questions_data)} questions.")
 
-            title = body.get("title", "").strip()
-            description = body.get("description", "").strip()
-            duration = int(body.get("durationMinutes", 60))
-            exam_code = body.get("examCode", "").strip().upper()
-            if not exam_code:
-                import random
-                exam_code = str(random.randint(10000, 99999))
-
-            questions_data = body.get("questions", [])
-
-            if not title:
-                return self.send_json({"error": "Assessment Title is required"}, status=400)
-            if not questions_data or len(questions_data) == 0:
-                return self.send_json({"error": "At least one question is required"}, status=400)
-
-            conn = get_db()
-            cursor = conn.cursor()
-
-            cursor.execute("SELECT id FROM assessments WHERE exam_code = ?", (exam_code,))
-            if cursor.fetchone():
-                conn.close()
-                return self.send_json({"error": f"Exam code '{exam_code}' is already taken"}, status=400)
-
-            cursor.execute("""
-            INSERT INTO assessments (exam_code, title, description, duration_minutes, created_by)
-            VALUES (?, ?, ?, ?, ?)
-            """, (exam_code, title, description, duration, user['id']))
-            assessment_id = cursor.lastrowid
-
-            for q_idx, q in enumerate(questions_data, start=1):
-                cursor.execute("""
-                INSERT INTO questions (assessment_id, order_index, text, reason)
-                VALUES (?, ?, ?, ?)
-                """, (assessment_id, q_idx, q.get("text", "").strip(), q.get("reason", "").strip()))
-                q_id = cursor.lastrowid
-
-                for o_idx, opt in enumerate(q.get("options", []), start=1):
-                    cursor.execute("""
-                    INSERT INTO options (question_id, order_index, text, is_correct)
-                    VALUES (?, ?, ?, ?)
-                    """, (q_id, o_idx, opt.get("text", "").strip(), 1 if opt.get("isCorrect") else 0))
-
-            conn.commit()
-            conn.close()
-
-            log_audit("ASSESSMENT_CREATED", user['email'], exam_code, details=f"Created assessment '{title}' with {len(questions_data)} questions.")
-
-            return self.send_json({"success": True, "assessmentId": assessment_id, "examCode": exam_code})
-
-        # 5. CSV Bulk Import (`/api/v1/assessments/:id/import-csv`)
-        elif path.endswith("/import-csv"):
-            user = self.authenticate_user()
-            if not user or user['role'] not in ('creator', 'admin'):
-                return self.send_json({"error": "Unauthorized"}, status=403)
-
-            match = re.search(r'/api/v1/assessments/(\d+)/import-csv', path)
-            if not match:
-                return self.send_json({"error": "Invalid endpoint path"}, status=400)
-            assessment_id = int(match.group(1))
-
-            csv_text = body.get("csvContent", "")
-            if csv_text.startswith('\ufeff'):
-                csv_text = csv_text[1:]
-
-            import csv
-            import io
-            reader = list(csv.reader(io.StringIO(csv_text)))
-            if not reader or len(reader) < 2:
-                return self.send_json({"error": "CSV file must contain a header row and at least one data row."}, status=400)
-
-            headers = [h.strip() for h in reader[0]]
-            
-            question_col = -1
-            answer_col = -1
-            reason_col = -1
-            option_cols = []
-
-            for i, h in enumerate(headers):
-                h_lower = h.lower()
-                if h_lower in ('question', 'question text'):
-                    question_col = i
-                elif h_lower in ('answer', 'correct answer'):
-                    answer_col = i
-                elif h_lower in ('reason', 'explanation'):
-                    reason_col = i
-                elif re.match(r'^option\s*\d+$', h_lower):
-                    option_cols.append((i, h))
-
-            if question_col == -1 or answer_col == -1 or not option_cols:
                 return self.send_json({
-                    "error": "CSV header format mismatch. Must contain 'Question', 'Answer', and 'Option 1', 'Option 2', etc."
-                }, status=400)
-
-            validation_errors = []
-            parsed_questions = []
-
-            for row_num, row in enumerate(reader[1:], start=2):
-                if not any(row):
-                    continue
-
-                q_text = row[question_col].strip() if question_col < len(row) else ""
-                ans_text = row[answer_col].strip() if answer_col < len(row) else ""
-                reason_text = row[reason_col].strip() if (reason_col != -1 and reason_col < len(row)) else ""
-
-                def sanitize_cell(val):
-                    if val and val[0] in ('=', '+', '-', '@'):
-                        return "'" + val
-                    return val
-
-                q_text = sanitize_cell(q_text)
-                ans_text = sanitize_cell(ans_text)
-                reason_text = sanitize_cell(reason_text)
-
-                if not q_text:
-                    validation_errors.append({"row": row_num, "message": "Question text is blank."})
-                    continue
-
-                row_options = []
-                for col_idx, col_name in option_cols:
-                    if col_idx < len(row):
-                        opt_val = sanitize_cell(row[col_idx].strip())
-                        if opt_val:
-                            row_options.append(opt_val)
-
-                if len(row_options) < 2:
-                    validation_errors.append({"row": row_num, "message": f"Question has fewer than 2 populated options ({len(row_options)} found)."})
-                    continue
-
-                correct_indices = []
-                matched = False
-                ans_upper = ans_text.upper()
-
-                if len(ans_upper) == 1 and 'A' <= ans_upper <= 'Z':
-                    target_idx = ord(ans_upper) - ord('A')
-                    if target_idx < len(row_options):
-                        correct_indices.append(target_idx)
-                        matched = True
-
-                if not matched and ans_upper.isdigit():
-                    target_idx = int(ans_upper) - 1
-                    if 0 <= target_idx < len(row_options):
-                        correct_indices.append(target_idx)
-                        matched = True
-
-                if not matched:
-                    for opt_i, opt_t in enumerate(row_options):
-                        if opt_t.lower() == ans_text.lower():
-                            correct_indices.append(opt_i)
-                            matched = True
-                            break
-
-                if not matched:
-                    validation_errors.append({
-                        "row": row_num,
-                        "message": f"Answer '{ans_text}' does not match any populated option or position for this row."
-                    })
-                    continue
-
-                parsed_questions.append({
-                    "text": q_text,
-                    "reason": reason_text,
-                    "options": [{"text": opt_t, "is_correct": (i in correct_indices)} for i, opt_t in enumerate(row_options)]
+                    "success": True,
+                    "assessmentId": assessment_id,
+                    "examCode": exam_code,
+                    "message": f"Published assessment '{title}' with PIN code: {exam_code}!"
                 })
 
-            if validation_errors:
-                return self.send_json({
-                    "success": False,
-                    "error": "CSV Validation Failed",
-                    "report": validation_errors,
-                    "parsedCount": len(parsed_questions)
-                }, status=422)
+            # 4. Student Exam Session Actions
+            elif path.startswith("/api/v1/assessments/"):
+                sub = path[len("/api/v1/assessments/"):]
+                
+                # Append CSV to existing assessment
+                if sub.endswith("/import-csv"):
+                    user = self.authenticate_user()
+                    if not user or user['role'] not in ('creator', 'admin'):
+                        return self.send_json({"error": "Unauthorized"}, status=403)
 
-            conn = get_db()
-            cursor = conn.cursor()
-            cursor.execute("SELECT MAX(order_index) FROM questions WHERE assessment_id = ?", (assessment_id,))
-            max_order_row = cursor.fetchone()
-            start_order = (max_order_row[0] or 0) + 1
+                    match = re.search(r'/api/v1/assessments/(\d+)/import-csv', path)
+                    if not match:
+                        return self.send_json({"error": "Invalid endpoint path"}, status=400)
+                    assessment_id = int(match.group(1))
 
-            for q_idx, q in enumerate(parsed_questions, start=start_order):
-                cursor.execute("""
-                INSERT INTO questions (assessment_id, order_index, text, reason)
-                VALUES (?, ?, ?, ?)
-                """, (assessment_id, q_idx, q['text'], q['reason']))
-                q_id = cursor.lastrowid
-                for o_idx, opt in enumerate(q['options'], start=1):
-                    cursor.execute("""
-                    INSERT INTO options (question_id, order_index, text, is_correct)
-                    VALUES (?, ?, ?, ?)
-                    """, (q_id, o_idx, opt['text'], 1 if opt['is_correct'] else 0))
+                    conn = get_db()
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT * FROM assessments WHERE id = ?", (assessment_id,))
+                    ass = cursor.fetchone()
+                    if not ass:
+                        conn.close()
+                        return self.send_json({"error": "Assessment not found"}, status=404)
 
-            conn.commit()
-            conn.close()
+                    csv_text = body.get("csvContent", "")
+                    if csv_text.startswith('\ufeff'):
+                        csv_text = csv_text[1:]
 
-            log_audit("CSV_IMPORTED", user['email'], details=f"Successfully imported {len(parsed_questions)} questions into assessment ID {assessment_id}.")
+                    import csv
+                    import io
+                    reader = list(csv.reader(io.StringIO(csv_text)))
+                    if not reader or len(reader) < 2:
+                        conn.close()
+                        return self.send_json({"error": "CSV file must contain a header row and at least one data row."}, status=400)
 
-            return self.send_json({
-                "success": True,
-                "importedCount": len(parsed_questions),
-                "message": f"Successfully imported {len(parsed_questions)} questions from CSV!"
-            })
+                    headers = [h.strip() for h in reader[0]]
+                    question_col = -1
+                    answer_col = -1
+                    reason_col = -1
+                    option_cols = []
 
-        # 5b. Create New Assessment from CSV (`/api/v1/assessments/import-csv-new`)
-        elif path == "/api/v1/assessments/import-csv-new":
-            user = self.authenticate_user()
-            if not user or user['role'] not in ('creator', 'admin'):
-                return self.send_json({"error": "Unauthorized"}, status=403)
+                    for i, h in enumerate(headers):
+                        h_lower = h.lower()
+                        if h_lower in ('question', 'question text'):
+                            question_col = i
+                        elif h_lower in ('answer', 'correct answer'):
+                            answer_col = i
+                        elif h_lower in ('reason', 'explanation'):
+                            reason_col = i
+                        elif re.match(r'^option\s*\d+$', h_lower):
+                            option_cols.append((i, h))
 
-            title = body.get("title", "").strip()
-            description = body.get("description", "").strip()
-            duration = int(body.get("durationMinutes", 60))
-            exam_code = body.get("examCode", "").strip().upper()
+                    if question_col == -1 or answer_col == -1 or not option_cols:
+                        conn.close()
+                        return self.send_json({"error": "CSV header format mismatch. Must contain 'Question', 'Answer', and 'Option 1', 'Option 2', etc."}, status=400)
 
-            if not title:
-                return self.send_json({"error": "Assessment Title is required"}, status=400)
+                    cursor.execute("SELECT MAX(order_index) FROM questions WHERE assessment_id = ?", (assessment_id,))
+                    max_idx_row = cursor.fetchone()
+                    start_order_idx = (max_idx_row[0] or 0) + 1
 
-            if not exam_code:
-                import random
-                exam_code = str(random.randint(10000, 99999))
+                    parsed_questions = []
+                    validation_errors = []
 
-            conn = get_db()
-            cursor = conn.cursor()
-            cursor.execute("SELECT id FROM assessments WHERE exam_code = ?", (exam_code,))
-            if cursor.fetchone():
-                conn.close()
-                return self.send_json({"error": f"Exam PIN code '{exam_code}' is already in use. Please use a different PIN."}, status=400)
+                    for row_num, row in enumerate(reader[1:], start=2):
+                        if not any(row):
+                            continue
+                        q_text = row[question_col].strip() if question_col < len(row) else ""
+                        ans_text = row[answer_col].strip() if answer_col < len(row) else ""
+                        reason_text = row[reason_col].strip() if (reason_col != -1 and reason_col < len(row)) else ""
 
-            csv_text = body.get("csvContent", "")
-            if csv_text.startswith('\ufeff'):
-                csv_text = csv_text[1:]
+                        def sanitize_cell(val):
+                            if val and val[0] in ('=', '+', '-', '@'):
+                                return "'" + val
+                            return val
 
-            import csv
-            import io
-            reader = list(csv.reader(io.StringIO(csv_text)))
-            if not reader or len(reader) < 2:
-                conn.close()
-                return self.send_json({"error": "CSV file must contain a header row and at least one data row."}, status=400)
+                        q_text = sanitize_cell(q_text)
+                        ans_text = sanitize_cell(ans_text)
+                        reason_text = sanitize_cell(reason_text)
 
-            headers = [h.strip() for h in reader[0]]
-            
-            question_col = -1
-            answer_col = -1
-            reason_col = -1
-            option_cols = []
+                        if not q_text:
+                            validation_errors.append({"row": row_num, "message": "Question text is blank."})
+                            continue
 
-            for i, h in enumerate(headers):
-                h_lower = h.lower()
-                if h_lower in ('question', 'question text'):
-                    question_col = i
-                elif h_lower in ('answer', 'correct answer'):
-                    answer_col = i
-                elif h_lower in ('reason', 'explanation'):
-                    reason_col = i
-                elif re.match(r'^option\s*\d+$', h_lower):
-                    option_cols.append((i, h))
+                        row_options = []
+                        for col_idx, col_name in option_cols:
+                            if col_idx < len(row):
+                                opt_val = sanitize_cell(row[col_idx].strip())
+                                if opt_val:
+                                    row_options.append(opt_val)
 
-            if question_col == -1 or answer_col == -1 or not option_cols:
-                conn.close()
-                return self.send_json({
-                    "error": "CSV header format mismatch. Must contain 'Question', 'Answer', and 'Option 1', 'Option 2', etc."
-                }, status=400)
+                        if len(row_options) < 2:
+                            validation_errors.append({"row": row_num, "message": f"Question has fewer than 2 populated options ({len(row_options)} found)."})
+                            continue
 
-            validation_errors = []
-            parsed_questions = []
+                        correct_indices = []
+                        matched = False
+                        ans_upper = ans_text.upper()
 
-            for row_num, row in enumerate(reader[1:], start=2):
-                if not any(row):
-                    continue
+                        if len(ans_upper) == 1 and 'A' <= ans_upper <= 'Z':
+                            target_idx = ord(ans_upper) - ord('A')
+                            if target_idx < len(row_options):
+                                correct_indices.append(target_idx)
+                                matched = True
 
-                q_text = row[question_col].strip() if question_col < len(row) else ""
-                ans_text = row[answer_col].strip() if answer_col < len(row) else ""
-                reason_text = row[reason_col].strip() if (reason_col != -1 and reason_col < len(row)) else ""
+                        if not matched and ans_upper.isdigit():
+                            target_idx = int(ans_upper) - 1
+                            if 0 <= target_idx < len(row_options):
+                                correct_indices.append(target_idx)
+                                matched = True
 
-                def sanitize_cell(val):
-                    if val and val[0] in ('=', '+', '-', '@'):
-                        return "'" + val
-                    return val
+                        if not matched:
+                            for opt_i, opt_t in enumerate(row_options):
+                                if opt_t.lower() == ans_text.lower():
+                                    correct_indices.append(opt_i)
+                                    matched = True
+                                    break
 
-                q_text = sanitize_cell(q_text)
-                ans_text = sanitize_cell(ans_text)
-                reason_text = sanitize_cell(reason_text)
+                        if not matched:
+                            validation_errors.append({"row": row_num, "message": f"Answer '{ans_text}' does not match any option for this row."})
+                            continue
 
-                if not q_text:
-                    validation_errors.append({"row": row_num, "message": "Question text is blank."})
-                    continue
+                        parsed_questions.append({
+                            "text": q_text,
+                            "reason": reason_text,
+                            "options": [{"text": opt_t, "is_correct": (i in correct_indices)} for i, opt_t in enumerate(row_options)]
+                        })
 
-                row_options = []
-                for col_idx, col_name in option_cols:
-                    if col_idx < len(row):
-                        opt_val = sanitize_cell(row[col_idx].strip())
-                        if opt_val:
-                            row_options.append(opt_val)
+                    if validation_errors:
+                        conn.close()
+                        return self.send_json({
+                            "success": False,
+                            "error": "CSV Validation Failed",
+                            "report": validation_errors,
+                            "parsedCount": len(parsed_questions)
+                        }, status=422)
 
-                if len(row_options) < 2:
-                    validation_errors.append({"row": row_num, "message": f"Question has fewer than 2 populated options ({len(row_options)} found)."})
-                    continue
+                    for offset, q in enumerate(parsed_questions):
+                        q_order = start_order_idx + offset
+                        cursor.execute("""
+                        INSERT INTO questions (assessment_id, order_index, text, reason)
+                        VALUES (?, ?, ?, ?)
+                        """, (assessment_id, q_order, q['text'], q['reason']))
+                        q_id = cursor.lastrowid
+                        for o_idx, opt in enumerate(q['options'], start=1):
+                            cursor.execute("""
+                            INSERT INTO options (question_id, order_index, text, is_correct)
+                            VALUES (?, ?, ?, ?)
+                            """, (q_id, o_idx, opt['text'], 1 if opt['is_correct'] else 0))
 
-                correct_indices = []
-                matched = False
-                ans_upper = ans_text.upper()
+                    conn.commit()
+                    conn.close()
 
-                if len(ans_upper) == 1 and 'A' <= ans_upper <= 'Z':
-                    target_idx = ord(ans_upper) - ord('A')
-                    if target_idx < len(row_options):
-                        correct_indices.append(target_idx)
-                        matched = True
+                    log_audit("CSV_IMPORTED", user['email'], details=f"Successfully imported {len(parsed_questions)} questions into assessment ID {assessment_id}.")
 
-                if not matched and ans_upper.isdigit():
-                    target_idx = int(ans_upper) - 1
-                    if 0 <= target_idx < len(row_options):
-                        correct_indices.append(target_idx)
-                        matched = True
-
-                if not matched:
-                    for opt_i, opt_t in enumerate(row_options):
-                        if opt_t.lower() == ans_text.lower():
-                            correct_indices.append(opt_i)
-                            matched = True
-                            break
-
-                if not matched:
-                    validation_errors.append({
-                        "row": row_num,
-                        "message": f"Answer '{ans_text}' does not match any populated option or position for this row."
+                    return self.send_json({
+                        "success": True,
+                        "importedCount": len(parsed_questions),
+                        "message": f"Successfully imported {len(parsed_questions)} questions from CSV!"
                     })
-                    continue
 
-                parsed_questions.append({
-                    "text": q_text,
-                    "reason": reason_text,
-                    "options": [{"text": opt_t, "is_correct": (i in correct_indices)} for i, opt_t in enumerate(row_options)]
+            # 5b. Create New Assessment from CSV (`/api/v1/assessments/import-csv-new`)
+            elif path == "/api/v1/assessments/import-csv-new":
+                user = self.authenticate_user()
+                if not user or user['role'] not in ('creator', 'admin'):
+                    return self.send_json({"error": "Unauthorized"}, status=403)
+
+                title = body.get("title", "").strip()
+                description = body.get("description", "").strip()
+                duration = int(body.get("durationMinutes", 60))
+                exam_code = body.get("examCode", "").strip().upper()
+
+                if not title:
+                    return self.send_json({"error": "Assessment Title is required"}, status=400)
+
+                if not exam_code:
+                    import random
+                    exam_code = str(random.randint(10000, 99999))
+
+                conn = get_db()
+                cursor = conn.cursor()
+                try:
+                    cursor.execute("SELECT id FROM assessments WHERE exam_code = ?", (exam_code,))
+                    if cursor.fetchone():
+                        return self.send_json({"error": f"Exam PIN code '{exam_code}' is already in use. Please use a different PIN."}, status=400)
+
+                    csv_text = body.get("csvContent", "")
+                    if csv_text.startswith('\ufeff'):
+                        csv_text = csv_text[1:]
+
+                    import csv
+                    import io
+                    reader = list(csv.reader(io.StringIO(csv_text)))
+                    if not reader or len(reader) < 2:
+                        return self.send_json({"error": "CSV file must contain a header row and at least one data row."}, status=400)
+
+                    headers = [h.strip() for h in reader[0]]
+                    question_col = -1
+                    answer_col = -1
+                    reason_col = -1
+                    option_cols = []
+
+                    for i, h in enumerate(headers):
+                        h_lower = h.lower()
+                        if h_lower in ('question', 'question text'):
+                            question_col = i
+                        elif h_lower in ('answer', 'correct answer'):
+                            answer_col = i
+                        elif h_lower in ('reason', 'explanation'):
+                            reason_col = i
+                        elif re.match(r'^option\s*\d+$', h_lower):
+                            option_cols.append((i, h))
+
+                    if question_col == -1 or answer_col == -1 or not option_cols:
+                        return self.send_json({
+                            "error": "CSV header format mismatch. Must contain 'Question', 'Answer', and 'Option 1', 'Option 2', etc."
+                        }, status=400)
+
+                    validation_errors = []
+                    parsed_questions = []
+
+                    for row_num, row in enumerate(reader[1:], start=2):
+                        if not any(row):
+                            continue
+
+                        q_text = row[question_col].strip() if question_col < len(row) else ""
+                        ans_text = row[answer_col].strip() if answer_col < len(row) else ""
+                        reason_text = row[reason_col].strip() if (reason_col != -1 and reason_col < len(row)) else ""
+
+                        def sanitize_cell(val):
+                            if val and val[0] in ('=', '+', '-', '@'):
+                                return "'" + val
+                            return val
+
+                        q_text = sanitize_cell(q_text)
+                        ans_text = sanitize_cell(ans_text)
+                        reason_text = sanitize_cell(reason_text)
+
+                        if not q_text:
+                            validation_errors.append({"row": row_num, "message": "Question text is blank."})
+                            continue
+
+                        row_options = []
+                        for col_idx, col_name in option_cols:
+                            if col_idx < len(row):
+                                opt_val = sanitize_cell(row[col_idx].strip())
+                                if opt_val:
+                                    row_options.append(opt_val)
+
+                        if len(row_options) < 2:
+                            validation_errors.append({"row": row_num, "message": f"Question has fewer than 2 populated options ({len(row_options)} found)."})
+                            continue
+
+                        correct_indices = []
+                        matched = False
+                        ans_upper = ans_text.upper()
+
+                        if len(ans_upper) == 1 and 'A' <= ans_upper <= 'Z':
+                            target_idx = ord(ans_upper) - ord('A')
+                            if target_idx < len(row_options):
+                                correct_indices.append(target_idx)
+                                matched = True
+
+                        if not matched and ans_upper.isdigit():
+                            target_idx = int(ans_upper) - 1
+                            if 0 <= target_idx < len(row_options):
+                                correct_indices.append(target_idx)
+                                matched = True
+
+                        if not matched:
+                            for opt_i, opt_t in enumerate(row_options):
+                                if opt_t.lower() == ans_text.lower():
+                                    correct_indices.append(opt_i)
+                                    matched = True
+                                    break
+
+                        if not matched:
+                            validation_errors.append({
+                                "row": row_num,
+                                "message": f"Answer '{ans_text}' does not match any populated option or position for this row."
+                            })
+                            continue
+
+                        parsed_questions.append({
+                            "text": q_text,
+                            "reason": reason_text,
+                            "options": [{"text": opt_t, "is_correct": (i in correct_indices)} for i, opt_t in enumerate(row_options)]
+                        })
+
+                    if validation_errors:
+                        return self.send_json({
+                            "success": False,
+                            "error": "CSV Validation Failed",
+                            "report": validation_errors,
+                            "parsedCount": len(parsed_questions)
+                        }, status=422)
+
+                    cursor.execute("""
+                    INSERT INTO assessments (exam_code, title, description, duration_minutes, created_by)
+                    VALUES (?, ?, ?, ?, ?)
+                    """, (exam_code, title, description, duration, user['id']))
+                    assessment_id = cursor.lastrowid
+
+                    for q_idx, q in enumerate(parsed_questions, start=1):
+                        cursor.execute("""
+                        INSERT INTO questions (assessment_id, order_index, text, reason)
+                        VALUES (?, ?, ?, ?)
+                        """, (assessment_id, q_idx, q['text'], q['reason']))
+                        q_id = cursor.lastrowid
+                        for o_idx, opt in enumerate(q['options'], start=1):
+                            cursor.execute("""
+                            INSERT INTO options (question_id, order_index, text, is_correct)
+                            VALUES (?, ?, ?, ?)
+                            """, (q_id, o_idx, opt['text'], 1 if opt['is_correct'] else 0))
+
+                    conn.commit()
+                finally:
+                    conn.close()
+
+                log_audit("ASSESSMENT_CREATED_VIA_CSV", user['email'], exam_code, details=f"Published assessment '{title}' with {len(parsed_questions)} questions via CSV import.")
+
+                return self.send_json({
+                    "success": True,
+                    "assessmentId": assessment_id,
+                    "examCode": exam_code,
+                    "importedCount": len(parsed_questions),
+                    "message": f"Published assessment '{title}' ({exam_code}) with {len(parsed_questions)} questions!"
                 })
 
-            if validation_errors:
-                conn.close()
-                return self.send_json({
-                    "success": False,
-                    "error": "CSV Validation Failed",
-                    "report": validation_errors,
-                    "parsedCount": len(parsed_questions)
-                }, status=422)
+            # 5c. Assessment Toggle Active / Update (`/api/v1/assessments/:id/update`)
+            elif path.endswith("/update"):
+                user = self.authenticate_user()
+                if not user or user['role'] not in ('creator', 'admin'):
+                    return self.send_json({"error": "Unauthorized"}, status=403)
 
-            cursor.execute("""
-            INSERT INTO assessments (exam_code, title, description, duration_minutes, created_by)
-            VALUES (?, ?, ?, ?, ?)
-            """, (exam_code, title, description, duration, user['id']))
-            assessment_id = cursor.lastrowid
+                match = re.search(r'/api/v1/assessments/(\d+)/update', path)
+                if not match:
+                    return self.send_json({"error": "Invalid endpoint path"}, status=400)
+                assessment_id = int(match.group(1))
 
-            for q_idx, q in enumerate(parsed_questions, start=1):
-                cursor.execute("""
-                INSERT INTO questions (assessment_id, order_index, text, reason)
-                VALUES (?, ?, ?, ?)
-                """, (assessment_id, q_idx, q['text'], q['reason']))
-                q_id = cursor.lastrowid
-                for o_idx, opt in enumerate(q['options'], start=1):
+                conn = get_db()
+                cursor = conn.cursor()
+                try:
+                    if "is_active" in body:
+                        cursor.execute("UPDATE assessments SET is_active = ? WHERE id = ?", (1 if body["is_active"] else 0, assessment_id))
+                    if "title" in body:
+                        cursor.execute("UPDATE assessments SET title = ? WHERE id = ?", (body["title"].strip(), assessment_id))
+                    if "duration_minutes" in body:
+                        cursor.execute("UPDATE assessments SET duration_minutes = ? WHERE id = ?", (int(body["duration_minutes"]), assessment_id))
+
+                    conn.commit()
+                finally:
+                    conn.close()
+
+                log_audit("ASSESSMENT_UPDATED", user['email'], details=f"Updated settings for assessment ID {assessment_id}")
+
+                return self.send_json({"success": True})
+
+            # 5d. Assessment Revoke / Delete (`/api/v1/assessments/:id/delete`)
+            elif path.endswith("/delete"):
+                user = self.authenticate_user()
+                if not user or user['role'] not in ('creator', 'admin'):
+                    return self.send_json({"error": "Unauthorized"}, status=403)
+
+                match = re.search(r'/api/v1/assessments/(\d+)/delete', path)
+                if not match:
+                    return self.send_json({"error": "Invalid endpoint path"}, status=400)
+                assessment_id = int(match.group(1))
+
+                conn = get_db()
+                cursor = conn.cursor()
+                try:
+                    cursor.execute("SELECT exam_code, title FROM assessments WHERE id = ?", (assessment_id,))
+                    ass = cursor.fetchone()
+                    if not ass:
+                        return self.send_json({"error": "Assessment not found"}, status=404)
+
+                    cursor.execute("DELETE FROM options WHERE question_id IN (SELECT id FROM questions WHERE assessment_id = ?)", (assessment_id,))
+                    cursor.execute("DELETE FROM questions WHERE assessment_id = ?", (assessment_id,))
+                    cursor.execute("DELETE FROM exam_attempts WHERE assessment_id = ?", (assessment_id,))
+                    cursor.execute("DELETE FROM assessments WHERE id = ?", (assessment_id,))
+
+                    conn.commit()
+                finally:
+                    conn.close()
+
+                log_audit("ASSESSMENT_DELETED", user['email'], ass['exam_code'], details=f"Deleted assessment '{ass['title']}' (ID: {assessment_id}).")
+
+                return self.send_json({"success": True, "message": f"Assessment '{ass['title']}' revoked and deleted."})
+
+            # 6. Student Heartbeat
+            elif path.endswith("/heartbeat"):
+                match = re.search(r'/api/v1/assessments/(\d+)/heartbeat', path)
+                if not match:
+                    return self.send_json({"error": "Invalid endpoint path"}, status=400)
+                exam_code = match.group(1)
+
+                cookies = parse_cookies(self.headers.get('Cookie'))
+                session_cookie = cookies.get('flylock_exam_session')
+
+                if not session_cookie:
+                    return self.send_json({"error": "Missing exam session cookie"}, status=401)
+
+                conn = get_db()
+                cursor = conn.cursor()
+                try:
                     cursor.execute("""
-                    INSERT INTO options (question_id, order_index, text, is_correct)
-                    VALUES (?, ?, ?, ?)
-                    """, (q_id, o_idx, opt['text'], 1 if opt['is_correct'] else 0))
+                    SELECT * FROM exam_attempts WHERE exam_code = ? AND session_cookie_id = ?
+                    """, (exam_code, session_cookie))
+                    att = cursor.fetchone()
 
-            conn.commit()
-            conn.close()
+                    if not att:
+                        return self.send_json({"error": "Exam attempt not found or invalid session"}, status=404)
 
-            log_audit("ASSESSMENT_CREATED_VIA_CSV", user['email'], exam_code, details=f"Published assessment '{title}' with {len(parsed_questions)} questions via CSV import.")
+                    if att['status'] == 'terminated':
+                        return self.send_json({
+                            "status": "terminated",
+                            "reason": att['termination_reason'] or "Proctor focus security violation"
+                        })
 
-            return self.send_json({
-                "success": True,
-                "assessmentId": assessment_id,
-                "examCode": exam_code,
-                "importedCount": len(parsed_questions),
-                "message": f"Published assessment '{title}' ({exam_code}) with {len(parsed_questions)} questions!"
-            })
+                    if att['status'] == 'submitted':
+                        return self.send_json({"status": "submitted"})
 
-        # 5c. Assessment Toggle Active / Update (`/api/v1/assessments/:id/update`)
-        elif path.endswith("/update"):
-            user = self.authenticate_user()
-            if not user or user['role'] not in ('creator', 'admin'):
-                return self.send_json({"error": "Unauthorized"}, status=403)
+                    saved_answers = body.get("answers")
+                    if saved_answers is not None:
+                        answers_json = json.dumps(saved_answers)
+                        cursor.execute("""
+                        UPDATE exam_attempts
+                        SET last_heartbeat = CURRENT_TIMESTAMP, saved_answers = ?
+                        WHERE id = ?
+                        """, (answers_json, att['id']))
+                    else:
+                        cursor.execute("""
+                        UPDATE exam_attempts
+                        SET last_heartbeat = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """, (att['id'],))
 
-            match = re.search(r'/api/v1/assessments/(\d+)/update', path)
-            if not match:
-                return self.send_json({"error": "Invalid endpoint path"}, status=400)
-            assessment_id = int(match.group(1))
+                    conn.commit()
+                finally:
+                    conn.close()
 
-            conn = get_db()
-            cursor = conn.cursor()
+                return self.send_json({"status": "ok"})
 
-            if "is_active" in body:
-                cursor.execute("UPDATE assessments SET is_active = ? WHERE id = ?", (1 if body["is_active"] else 0, assessment_id))
-            if "title" in body:
-                cursor.execute("UPDATE assessments SET title = ? WHERE id = ?", (body["title"].strip(), assessment_id))
-            if "duration_minutes" in body:
-                cursor.execute("UPDATE assessments SET duration_minutes = ? WHERE id = ?", (int(body["duration_minutes"]), assessment_id))
+            # 7. Student Exam Submit
+            elif path.endswith("/submit"):
+                match = re.search(r'/api/v1/assessments/(\d+)/submit', path)
+                if not match:
+                    return self.send_json({"error": "Invalid endpoint path"}, status=400)
+                exam_code = match.group(1)
 
-            conn.commit()
-            conn.close()
+                cookies = parse_cookies(self.headers.get('Cookie'))
+                session_cookie = cookies.get('flylock_exam_session')
 
-            log_audit("ASSESSMENT_UPDATED", user['email'], details=f"Updated settings for assessment ID {assessment_id}")
+                if not session_cookie:
+                    return self.send_json({"error": "Missing exam session cookie"}, status=401)
 
-            return self.send_json({"success": True})
+                conn = get_db()
+                cursor = conn.cursor()
+                try:
+                    cursor.execute("""
+                    SELECT * FROM exam_attempts WHERE exam_code = ? AND session_cookie_id = ?
+                    """, (exam_code, session_cookie))
+                    att = cursor.fetchone()
 
-        # 5d. Assessment Revoke / Delete (`/api/v1/assessments/:id/delete`)
-        elif path.endswith("/delete"):
-            user = self.authenticate_user()
-            if not user or user['role'] not in ('creator', 'admin'):
-                return self.send_json({"error": "Unauthorized"}, status=403)
+                    if not att or att['status'] != 'in_progress':
+                        return self.send_json({"error": "Attempt is not in progress"}, status=400)
 
-            match = re.search(r'/api/v1/assessments/(\d+)/delete', path)
-            if not match:
-                return self.send_json({"error": "Invalid endpoint path"}, status=400)
-            assessment_id = int(match.group(1))
+                    saved_answers = body.get("answers")
+                    if saved_answers is not None:
+                        saved_answers = json.dumps(saved_answers)
+                    else:
+                        saved_answers = att['saved_answers'] or '{}'
 
-            conn = get_db()
-            cursor = conn.cursor()
-            cursor.execute("SELECT exam_code, title FROM assessments WHERE id = ?", (assessment_id,))
-            ass = cursor.fetchone()
-            if not ass:
-                conn.close()
-                return self.send_json({"error": "Assessment not found"}, status=404)
+                    cursor.execute("SELECT q.id, o.id as correct_opt_id FROM questions q JOIN options o ON o.question_id = q.id WHERE q.assessment_id = ? AND o.is_correct = 1", (att['assessment_id'],))
+                    correct_map = {str(r[0]): r[1] for r in cursor.fetchall()}
+                    
+                    answers_dict = json.loads(saved_answers or '{}')
+                    correct_count = 0
+                    total_questions = len(correct_map)
+                    
+                    for q_id_str, selected_opt_id in answers_dict.items():
+                        if str(q_id_str) in correct_map and correct_map[str(q_id_str)] == selected_opt_id:
+                            correct_count += 1
 
-            # Cascade delete options and questions
-            cursor.execute("DELETE FROM options WHERE question_id IN (SELECT id FROM questions WHERE assessment_id = ?)", (assessment_id,))
-            cursor.execute("DELETE FROM questions WHERE assessment_id = ?", (assessment_id,))
-            cursor.execute("DELETE FROM exam_attempts WHERE assessment_id = ?", (assessment_id,))
-            cursor.execute("DELETE FROM assessments WHERE id = ?", (assessment_id,))
+                    percentage = round((correct_count / total_questions * 100), 1) if total_questions > 0 else 0
 
-            conn.commit()
-            conn.close()
+                    cursor.execute("""
+                    UPDATE exam_attempts
+                    SET status = 'submitted', submitted_at = CURRENT_TIMESTAMP, saved_answers = ?
+                    WHERE id = ?
+                    """, (saved_answers, att['id']))
 
-            log_audit("ASSESSMENT_DELETED", user['email'], ass['exam_code'], details=f"Deleted assessment '{ass['title']}' (ID: {assessment_id}).")
+                    conn.commit()
+                finally:
+                    conn.close()
 
-            return self.send_json({"success": True, "message": f"Assessment '{ass['title']}' revoked and deleted."})
+                log_audit("EXAM_SUBMITTED", att['student_identifier'], att['exam_code'], session_id=session_cookie, details=f"Student submitted. Score: {correct_count}/{total_questions} ({percentage}%)")
 
-        # 6. Assessment Heartbeat (Autosave & Liveness)
-        elif path.endswith("/heartbeat"):
-            cookies = parse_cookies(self.headers.get('Cookie'))
-            session_cookie = cookies.get('flylock_exam_session')
-            if not session_cookie:
-                return self.send_json({"error": "No exam session cookie"}, status=401)
+                cookie_header = "flylock_exam_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+                return self.send_json({
+                    "success": True,
+                    "message": "Assessment submitted successfully.",
+                    "score": correct_count,
+                    "totalQuestions": total_questions,
+                    "percentage": percentage
+                }, headers_dict={"Set-Cookie": cookie_header})
 
-            saved_answers = json.dumps(body.get("answers", {}))
+            # 8. Admin Allowlist Add / Revoke
+            elif path == "/api/v1/admin/allowlist":
+                user = self.authenticate_user()
+                if not user:
+                    return self.send_json({"error": "Unauthorized"}, status=401)
 
-            conn = get_db()
-            cursor = conn.cursor()
-            cursor.execute("""
-            UPDATE exam_attempts
-            SET last_heartbeat = CURRENT_TIMESTAMP, saved_answers = ?
-            WHERE session_cookie_id = ? AND status = 'in_progress'
-            """, (saved_answers, session_cookie))
-            conn.commit()
-            conn.close()
+                action = body.get("action", "")
+                target_email = body.get("email", "").strip().lower()
 
-            return self.send_json({"status": "acknowledged", "timestamp": int(time.time())})
+                if not target_email:
+                    return self.send_json({"error": "Email is required"}, status=400)
 
-        # 7. Assessment Submit
-        elif path.endswith("/submit"):
-            cookies = parse_cookies(self.headers.get('Cookie'))
-            session_cookie = cookies.get('flylock_exam_session')
-            if not session_cookie:
-                return self.send_json({"error": "No exam session cookie"}, status=401)
+                conn = get_db()
+                cursor = conn.cursor()
 
-            saved_answers = json.dumps(body.get("answers", {}))
+                try:
+                    if action == "add":
+                        cursor.execute("SELECT id FROM creator_allowlist WHERE email = ?", (target_email,))
+                        existing = cursor.fetchone()
+                        if existing:
+                            cursor.execute("UPDATE creator_allowlist SET status = 'active', added_by = ? WHERE email = ?", (user['email'], target_email))
+                        else:
+                            cursor.execute("INSERT INTO creator_allowlist (email, added_by, status) VALUES (?, ?, 'active')", (target_email, user['email']))
+                        log_audit("ALLOWLIST_ADD", user['email'], details=f"Added {target_email} to creator allowlist.")
 
-            conn = get_db()
-            cursor = conn.cursor()
-            cursor.execute("""
-            SELECT ea.id, ea.assessment_id, ea.student_identifier, ea.exam_code, ea.status
-            FROM exam_attempts ea
-            WHERE ea.session_cookie_id = ?
-            """, (session_cookie,))
-            att = cursor.fetchone()
+                    elif action == "revoke":
+                        cursor.execute("UPDATE creator_allowlist SET status = 'revoked' WHERE email = ?", (target_email,))
+                        cursor.execute("SELECT id FROM users WHERE email = ?", (target_email,))
+                        target_u = cursor.fetchone()
+                        if target_u:
+                            cursor.execute("UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ?", (target_u['id'],))
+                            cursor.execute("UPDATE users SET active_session_id = NULL WHERE id = ?", (target_u['id'],))
+                        log_audit("ALLOWLIST_REVOKE", user['email'], details=f"Revoked {target_email} from creator allowlist and terminated active sessions.")
 
-            if not att or att['status'] != 'in_progress':
-                conn.close()
-                return self.send_json({"error": "Attempt is not in progress"}, status=400)
+                    conn.commit()
+                finally:
+                    conn.close()
 
-            # Calculate score and percentage
-            cursor.execute("SELECT q.id, o.id as correct_opt_id FROM questions q JOIN options o ON o.question_id = q.id WHERE q.assessment_id = ? AND o.is_correct = 1", (att['assessment_id'],))
-            correct_map = {str(r[0]): r[1] for r in cursor.fetchall()}
-            
-            answers_dict = json.loads(saved_answers or '{}')
-            correct_count = 0
-            total_questions = len(correct_map)
-            
-            for q_id_str, selected_opt_id in answers_dict.items():
-                if str(q_id_str) in correct_map and correct_map[str(q_id_str)] == selected_opt_id:
-                    correct_count += 1
+                return self.send_json({"success": True, "message": f"Allowlist updated for {target_email}"})
 
-            percentage = round((correct_count / total_questions * 100), 1) if total_questions > 0 else 0
+            # 9. Admin & Creator Session / Attempt Reset & Reattempt Grant Endpoint
+            elif path == "/api/v1/admin/attempts/reset" or path == "/api/v1/assessments/attempts/reset":
+                user = self.authenticate_user()
+                if not user or user['role'] not in ('creator', 'admin'):
+                    return self.send_json({"error": "Creator or Admin privilege required"}, status=403)
 
-            cursor.execute("""
-            UPDATE exam_attempts
-            SET status = 'submitted', submitted_at = CURRENT_TIMESTAMP, saved_answers = ?
-            WHERE id = ?
-            """, (saved_answers, att['id']))
+                attempt_id = body.get("attemptId")
+                action = body.get("action", "reset")
 
-            conn.commit()
-            conn.close()
+                if not attempt_id:
+                    return self.send_json({"error": "attemptId is required"}, status=400)
 
-            log_audit("EXAM_SUBMITTED", att['student_identifier'], att['exam_code'], session_id=session_cookie, details=f"Student submitted. Score: {correct_count}/{total_questions} ({percentage}%)")
+                conn = get_db()
+                cursor = conn.cursor()
+                try:
+                    cursor.execute("SELECT * FROM exam_attempts WHERE id = ?", (attempt_id,))
+                    att = cursor.fetchone()
+                    if not att:
+                        return self.send_json({"error": "Exam attempt not found"}, status=404)
 
-            cookie_header = "flylock_exam_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
-            return self.send_json({
-                "success": True,
-                "message": "Assessment submitted successfully.",
-                "score": correct_count,
-                "totalQuestions": total_questions,
-                "percentage": percentage
-            }, headers_dict={"Set-Cookie": cookie_header})
+                    student_email = att['student_email'] or att['student_identifier']
+                    exam_code = att['exam_code']
 
-        # 8. Admin Allowlist Add / Revoke
-        elif path == "/api/v1/admin/allowlist":
-            user = self.authenticate_user()
-            if not user:
-                return self.send_json({"error": "Unauthorized"}, status=401)
+                    if action == "delete":
+                        cursor.execute("DELETE FROM exam_attempts WHERE id = ?", (attempt_id,))
+                        conn.commit()
+                        log_audit("ATTEMPT_DELETED", user['email'], exam_code, details=f"Deleted attempt #{attempt_id} for {student_email}.")
+                        return self.send_json({"success": True, "message": f"Attempt for {student_email} deleted. Student can now reattempt."})
+                    else:
+                        cursor.execute("DELETE FROM exam_attempts WHERE id = ?", (attempt_id,))
+                        conn.commit()
+                        log_audit("REATTEMPT_GRANTED", user['email'], exam_code, details=f"Granted reattempt for #{attempt_id} ({student_email}). Previous attempt cleared.")
+                        return self.send_json({"success": True, "message": f"Re-attempt granted for {student_email} on assessment {exam_code}!"})
+                finally:
+                    conn.close()
 
-            action = body.get("action", "")
-            target_email = body.get("email", "").strip().lower()
+            return self.send_json({"error": "Not Found"}, status=404)
 
-            if not target_email:
-                return self.send_json({"error": "Email is required"}, status=400)
-
-            conn = get_db()
-            cursor = conn.cursor()
-
-            if action == "add":
-                cursor.execute("""
-                INSERT INTO creator_allowlist (email, added_by, status)
-                VALUES (?, ?, 'active')
-                ON CONFLICT(email) DO UPDATE SET status = 'active'
-                """, (target_email, user['email']))
-                log_audit("ALLOWLIST_ADD", user['email'], details=f"Added {target_email} to creator allowlist.")
-            elif action == "revoke":
-                cursor.execute("UPDATE creator_allowlist SET status = 'revoked' WHERE email = ?", (target_email,))
-                cursor.execute("SELECT id FROM users WHERE email = ?", (target_email,))
-                target_u = cursor.fetchone()
-                if target_u:
-                    cursor.execute("UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ?", (target_u['id'],))
-                    cursor.execute("UPDATE users SET active_session_id = NULL WHERE id = ?", (target_u['id'],))
-                log_audit("ALLOWLIST_REVOKE", user['email'], details=f"Revoked {target_email} from creator allowlist and terminated active sessions.")
-
-            conn.commit()
-            conn.close()
-
-            return self.send_json({"success": True})
-
-        # 9. Admin & Creator Session / Attempt Reset & Reattempt Grant Endpoint
-        elif path == "/api/v1/admin/attempts/reset" or path == "/api/v1/assessments/attempts/reset":
-            user = self.authenticate_user()
-            if not user or user['role'] not in ('creator', 'admin'):
-                return self.send_json({"error": "Creator or Admin privilege required"}, status=403)
-
-            attempt_id = body.get("attemptId")
-            action = body.get("action", "reset")
-
-            conn = get_db()
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM exam_attempts WHERE id = ?", (attempt_id,))
-            att = cursor.fetchone()
-            if not att:
-                conn.close()
-                return self.send_json({"error": "Attempt not found"}, status=404)
-
-            student_email = att['student_email'] or att['student_identifier']
-            exam_code = att['exam_code']
-
-            if action == "delete":
-                cursor.execute("DELETE FROM exam_attempts WHERE id = ?", (attempt_id,))
-                conn.commit()
-                conn.close()
-                log_audit("ATTEMPT_DELETED", user['email'], exam_code, details=f"Deleted attempt #{attempt_id} for {student_email}.")
-                return self.send_json({"success": True, "message": f"Attempt for {student_email} deleted. Student can now reattempt."})
-            else:
-                cursor.execute("DELETE FROM exam_attempts WHERE id = ?", (attempt_id,))
-                conn.commit()
-                conn.close()
-                log_audit("REATTEMPT_GRANTED", user['email'], exam_code, details=f"Granted reattempt for #{attempt_id} ({student_email}). Previous attempt cleared.")
-                return self.send_json({"success": True, "message": f"Re-attempt granted for {student_email} on assessment {exam_code}!"})
-
-        return self.send_json({"error": "Not Found"}, status=404)
+        except Exception as ex:
+            import traceback
+            traceback.print_exc()
+            return self.send_json({"error": "Internal Server Error", "details": str(ex)}, status=500)
 
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
