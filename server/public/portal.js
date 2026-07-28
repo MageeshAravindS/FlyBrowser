@@ -172,6 +172,7 @@ document.addEventListener('DOMContentLoaded', () => {
       showToast('Google login failed', 'error');
     }
   };
+  window.onGoogleLibraryCallback = window.handleGoogleCredentialResponse;
 
   // Email Login
   formLogin.addEventListener('submit', async (e) => {
