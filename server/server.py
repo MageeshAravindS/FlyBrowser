@@ -17,8 +17,14 @@ GOOGLE_CLIENT_ID = "556888061468-r7ukjulnh2esht6vrtjqtgs6gim0slhh.apps.googleuse
 LATEST_STUDENT_SESSION = {"email": None, "timestamp": 0}
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA busy_timeout=10000;")
+    except Exception:
+        pass
     return conn
 
 def init_db():
@@ -1601,13 +1607,20 @@ class FlyLockHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
 
         return self.send_json({"error": "Not Found"}, status=404)
 
+class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
 def run_server(port=8080):
     os.chdir(os.path.join(os.path.dirname(__file__), "public"))
     init_db()
     handler = FlyLockHTTPRequestHandler
-    with socketserver.TCPServer(("", port), handler) as httpd:
-        print(f"Server running on port {port}...")
+    httpd = ThreadedHTTPServer(("", port), handler)
+    print(f"High-Concurrency FlyLock Server (500+ Students Capacity) running on port {port}...")
+    try:
         httpd.serve_forever()
+    except KeyboardInterrupt:
+        httpd.server_close()
 
 if __name__ == "__main__":
     import sys

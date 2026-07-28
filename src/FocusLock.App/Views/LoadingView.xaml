@@ -14,12 +14,34 @@
             </Border.Effect>
 
             <StackPanel HorizontalAlignment="Center">
-                <Image Source="pack://application:,,,/Assets/Logo.png" Width="64" Height="64" HorizontalAlignment="Center" Margin="0,0,0,24" RenderOptions.BitmapScalingMode="HighQuality"/>
+                <Image Source="pack://application:,,,/Assets/Logo.png" Width="64" Height="64" HorizontalAlignment="Center" Margin="0,0,0,20" RenderOptions.BitmapScalingMode="HighQuality"/>
 
-                <TextBlock x:Name="TxtAppName" Text="FlyLock Browser" FontSize="22" FontWeight="Bold" Foreground="#0F172A" HorizontalAlignment="Center" Margin="0,0,0,8"/>
+                <TextBlock x:Name="TxtAppName" Text="FlyLock Browser" FontSize="22" FontWeight="Bold" Foreground="#0F172A" HorizontalAlignment="Center" Margin="0,0,0,6"/>
                 <TextBlock x:Name="TxtStatus" Text="Initializing secure session..." FontSize="13" Foreground="#475569" TextAlignment="Center" Margin="0,0,0,24"/>
 
-                <ProgressBar IsIndeterminate="True" Height="6" Width="280" Foreground="#0F172A" Background="#E2E8F0" BorderThickness="0"/>
+                <!-- Dual-Layer Spinning Loading Animation Sequence -->
+                <Grid Width="80" Height="80" HorizontalAlignment="Center" Margin="0,0,0,12">
+                    <!-- Stationary Loading Centre Image in Middle -->
+                    <Image Source="pack://application:,,,/Assets/Loading_Centre.png" Width="36" Height="36" HorizontalAlignment="Center" VerticalAlignment="Center" RenderOptions.BitmapScalingMode="HighQuality"/>
+                    
+                    <!-- Spinning Loading Circle Layered Over Loading Centre -->
+                    <Image Source="pack://application:,,,/Assets/Loading_Circle.png" Width="80" Height="80" HorizontalAlignment="Center" VerticalAlignment="Center" RenderOptions.BitmapScalingMode="HighQuality" RenderTransformOrigin="0.5,0.5">
+                        <Image.RenderTransform>
+                            <RotateTransform x:Name="LoadingSpinTransform" Angle="0"/>
+                        </Image.RenderTransform>
+                        <Image.Triggers>
+                            <EventTrigger RoutedEvent="Loaded">
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetProperty="(Image.RenderTransform).(RotateTransform.Angle)"
+                                                         From="0" To="360" Duration="0:0:1.2"
+                                                         RepeatBehavior="Forever"/>
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </EventTrigger>
+                        </Image.Triggers>
+                    </Image>
+                </Grid>
             </StackPanel>
         </Border>
     </Grid>

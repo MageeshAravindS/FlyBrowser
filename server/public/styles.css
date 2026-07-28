@@ -821,3 +821,61 @@ body {
 .margin-bottom-md { margin-bottom: 1rem; }
 .flex-align-end { align-items: flex-end; }
 .align-right { justify-content: flex-end; }
+
+/* FlyLock Dual-Layer Loading Animation (Loading_Centre + Loading_Circle spinning) */
+.flylock-loading-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  padding: 2rem 1rem;
+  width: 100%;
+}
+
+.flylock-spinner-wrapper {
+  position: relative;
+  width: 80px;
+  height: 80px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.flylock-spinner-centre {
+  position: absolute;
+  width: 36px;
+  height: 36px;
+  z-index: 1;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.flylock-spinner-circle {
+  position: absolute;
+  width: 80px;
+  height: 80px;
+  z-index: 2;
+  object-fit: contain;
+  animation: flylock-spin 1.2s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes flylock-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.flylock-loading-text {
+  font-size: 0.9375rem;
+  font-weight: 700;
+  color: var(--primary, #0F172A);
+  letter-spacing: -0.01em;
+  text-align: center;
+}
+
+.loading-table-placeholder {
+  text-align: center;
+  padding: 3rem 1rem !important;
+}
+
