@@ -1,0 +1,2 @@
+# FlyLock Browser & Server Dependencies
+# Standard Library Used (http.server, socketserver, sqlite3, urllib, json, secrets, hashlib, hmac)
